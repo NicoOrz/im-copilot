@@ -40,6 +40,13 @@ class PlannerNodeTests(unittest.TestCase):
         result = planner_node({"intent_type": "chat"})
         self.assertEqual(result["plan"], ["deliver"])
 
+    def test_returns_fresh_plan_list(self):
+        first = planner_node({"intent_type": "create_doc"})
+        first["plan"].append("slide")
+
+        second = planner_node({"intent_type": "create_doc"})
+        self.assertEqual(second["plan"], ["doc", "deliver"])
+
 
 class MockNodeTests(unittest.TestCase):
     def test_doc_node_adds_doc_result(self):

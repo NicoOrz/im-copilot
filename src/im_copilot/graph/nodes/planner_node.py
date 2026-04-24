@@ -12,4 +12,4 @@ PLAN_BY_INTENT = {
 
 def planner_node(state: PipelineState) -> dict:
     intent_type = state.get("intent_type", "chat")
-    return {"plan": PLAN_BY_INTENT.get(intent_type, ["deliver"])}
+    return {"plan": list(PLAN_BY_INTENT.get(intent_type, ["deliver"]))}
