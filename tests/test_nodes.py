@@ -6,6 +6,7 @@ from im_copilot.graph.nodes.doc_node import doc_node
 from im_copilot.graph.nodes.intent_node import intent_node
 from im_copilot.graph.nodes.planner_node import planner_node
 from im_copilot.graph.nodes.slide_node import slide_node
+from im_copilot.graph.nodes.verify_node import verify_node
 from im_copilot.graph.nodes.whiteboard_node import whiteboard_node
 
 
@@ -92,6 +93,39 @@ class DeliverNodeTests(unittest.TestCase):
             }
         )
         self.assertEqual(result["summary"], "汇总结果")
+
+
+class VerifyNodeTests(unittest.TestCase):
+    @patch("im_copilot.graph.nodes.verify_node._llm")
+    def test_verify_pass(self, mock_llm):
+        mock_llm.invoke.return_value = MagicMock(status="pass", reason="质量合格")
+        result = verify_node({
+            "plan": ["doc", "deliver"],
+            "mock_results": {"doc": {"kind": "doc", "title": "t", "status": "created", "preview": "content"}},
+            "raw_message": "写文档",
+            "intent_type": "create_doc",
+            "reflection_iteration": 0,
+        })
+        self.assertEqual(result["checks"][0]["status"], "pass")
+        self.assertEqual(result["reflection_iteration"], 1)
+
+    @patch("im_copilot.graph.nodes.verify_node._llm")
+    def test_verify_revise(self, mock_llm):
+        mock_llm.invoke.return_value = MagicMock(status="revise", reason="内容不完整")
+        result = verify_node({
+            "plan": ["doc", "deliver"],
+            "mock_results": {"doc": {"kind": "doc", "title": "t", "status": "created", "preview": "content"}},
+            "raw_message": "写文档",
+            "intent_type": "create_doc",
+            "reflection_iteration": 0,
+        })
+        self.assertEqual(result["checks"][0]["status"], "revise")
+        self.assertEqual(result["checks"][0]["task"], "doc")
+
+    def test_verify_no_content(self):
+        result = verify_node({"plan": ["deliver"], "mock_results": {}})
+        self.assertEqual(result["checks"][0]["status"], "pass")
+        self.assertEqual(result["checks"][0]["task"], "none")
 
 
 if __name__ == "__main__":

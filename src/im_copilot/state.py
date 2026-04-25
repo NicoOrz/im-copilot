@@ -26,6 +26,18 @@ class CheckResult(TypedDict):
     reason: str
 
 
+class ClarificationTurn(TypedDict):
+    question: str
+    answer: str
+
+
+class ApprovalGate(TypedDict):
+    gate_name: str
+    status: Literal["pending", "approved", "rejected", "skipped"]
+    feedback: str
+    timestamp: str
+
+
 class PipelineState(TypedDict, total=False):
     raw_message: str
     chat_id: str
@@ -41,3 +53,11 @@ class PipelineState(TypedDict, total=False):
     summary: str
 
     errors: Annotated[list[str], add]
+
+    # Phase 2 fields
+    clarification_history: Annotated[list[ClarificationTurn], add]
+    approvals: Annotated[list[ApprovalGate], add]
+    reflection_iteration: int
+    side_agent_results: Annotated[list[dict], add]
+    thread_id: str
+    user_id: str

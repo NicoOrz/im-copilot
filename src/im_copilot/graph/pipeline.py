@@ -1,10 +1,12 @@
 from langgraph.graph import END, START, StateGraph
 
+from im_copilot.checkpointer import get_checkpointer
 from im_copilot.graph.nodes.deliver_node import deliver_node
 from im_copilot.graph.nodes.doc_node import doc_node
 from im_copilot.graph.nodes.intent_node import intent_node
 from im_copilot.graph.nodes.planner_node import planner_node
 from im_copilot.graph.nodes.slide_node import slide_node
+from im_copilot.graph.nodes.verify_node import verify_node
 from im_copilot.graph.nodes.whiteboard_node import whiteboard_node
 from im_copilot.state import PipelineState
 
@@ -20,28 +22,50 @@ def route_after_planner(state: PipelineState) -> str:
     return "deliver"
 
 
-def route_after_doc(state: PipelineState) -> str:
+def route_after_verify(state: PipelineState) -> str:
+    """Route after verify_node based on the latest check result.
+
+    - pass: continue to next content node or deliver
+    - revise: route back to the same content node (if under max iterations)
+    - clarify: route to deliver (for now; future: clarification node)
+    """
+    checks = state.get("checks", [])
+    if not checks:
+        return "deliver"
+
+    latest = checks[-1]
+    status = latest.get("status", "pass")
+    iteration = state.get("reflection_iteration", 0)
+    max_iterations = 3
+
+    if status == "revise" and iteration < max_iterations:
+        task = latest.get("task", "doc")
+        if task in ("doc", "whiteboard", "slide"):
+            return task
+        return "deliver"
+
+    # pass or clarify or max iterations reached
+    # Find next step in plan after the verified task
     plan = state.get("plan", [])
-    if "whiteboard" in plan:
-        return "whiteboard"
-    if "slide" in plan:
-        return "slide"
+    task = latest.get("task", "")
+    try:
+        idx = plan.index(task)
+        for step in plan[idx + 1 :]:
+            if step in ("doc", "whiteboard", "slide"):
+                return step
+    except ValueError:
+        pass
     return "deliver"
 
 
-def route_after_whiteboard(state: PipelineState) -> str:
-    if "slide" in state.get("plan", []):
-        return "slide"
-    return "deliver"
-
-
-def build_pipeline():
+def build_pipeline(checkpointer=None):
     builder = StateGraph(PipelineState)
     builder.add_node("intent", intent_node)
     builder.add_node("planner", planner_node)
     builder.add_node("doc", doc_node)
     builder.add_node("whiteboard", whiteboard_node)
     builder.add_node("slide", slide_node)
+    builder.add_node("verify", verify_node)
     builder.add_node("deliver", deliver_node)
 
     builder.add_edge(START, "intent")
@@ -51,19 +75,16 @@ def build_pipeline():
         route_after_planner,
         ["doc", "whiteboard", "slide", "deliver"],
     )
+    builder.add_edge("doc", "verify")
+    builder.add_edge("whiteboard", "verify")
+    builder.add_edge("slide", "verify")
     builder.add_conditional_edges(
-        "doc",
-        route_after_doc,
-        ["whiteboard", "slide", "deliver"],
+        "verify",
+        route_after_verify,
+        ["doc", "whiteboard", "slide", "deliver"],
     )
-    builder.add_conditional_edges(
-        "whiteboard",
-        route_after_whiteboard,
-        ["slide", "deliver"],
-    )
-    builder.add_edge("slide", "deliver")
     builder.add_edge("deliver", END)
-    return builder.compile()
+    return builder.compile(checkpointer=checkpointer)
 
 
 def run_pipeline(
@@ -72,8 +93,11 @@ def run_pipeline(
     chat_id: str = "cli",
     message_id: str = "cli",
     source: str = "cli",
+    thread_id: str | None = None,
 ) -> PipelineState:
-    graph = build_pipeline()
+    checkpointer = get_checkpointer()
+    graph = build_pipeline(checkpointer=checkpointer)
+    config = {"configurable": {"thread_id": thread_id or f"{chat_id}-{message_id}"}}
     initial_state: PipelineState = {
         "raw_message": message,
         "chat_id": chat_id,
@@ -81,8 +105,9 @@ def run_pipeline(
         "source": source,
         "errors": [],
         "checks": [],
+        "reflection_iteration": 0,
     }
-    return graph.invoke(initial_state)
+    return graph.invoke(initial_state, config=config)
 
 
 def debug_pipeline(message: str) -> None:
@@ -95,6 +120,7 @@ def debug_pipeline(message: str) -> None:
         "source": "cli",
         "errors": [],
         "checks": [],
+        "reflection_iteration": 0,
     }
     print(f"{'='*60}")
     print(f"Input: {message!r}")
@@ -126,11 +152,16 @@ graph TD
     planner -->|plan has whiteboard| whiteboard
     planner -->|plan has slide| slide
     planner -->|chat only| deliver
-    doc -->|plan has whiteboard| whiteboard
-    doc -->|plan has slide| slide
-    doc -->|otherwise| deliver
-    whiteboard -->|plan has slide| slide
-    whiteboard -->|otherwise| deliver
-    slide --> deliver
+    doc --> verify
+    whiteboard --> verify
+    slide --> verify
+    verify -->|pass| route_next
+    verify -->|revise| doc
+    verify -->|revise| whiteboard
+    verify -->|revise| slide
+    verify -->|clarify / max iter| deliver
+    route_next -->|next content| whiteboard
+    route_next -->|next content| slide
+    route_next -->|done| deliver
     deliver --> END
 """.strip()
