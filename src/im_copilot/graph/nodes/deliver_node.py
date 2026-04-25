@@ -1,4 +1,23 @@
+from im_copilot.llm import get_llm
 from im_copilot.state import PipelineState
+
+DELIVER_PROMPT = """你是一位智能助手，负责向用户汇总任务执行结果。
+
+用户原始请求：{raw_message}
+意图类型：{intent_type}
+
+执行结果：
+{results}
+
+请生成一段自然、友好的中文回复，向用户说明已完成的工作和关键成果。如果存在错误，请说明并道歉。"""
+
+CHAT_PROMPT = """你是一位友好的智能助手。请回复用户的聊天消息。
+
+用户消息：{message}
+
+请给出自然、有帮助的中文回复。"""
+
+_llm = get_llm()
 
 
 def deliver_node(state: PipelineState) -> dict:
@@ -6,17 +25,29 @@ def deliver_node(state: PipelineState) -> dict:
     if errors:
         return {"summary": "任务执行出现错误：" + "；".join(errors)}
 
-    if state.get("intent_type") == "chat":
-        return {"summary": "收到。Phase 1 当前支持文档、白板、PPT mock 工作流。"}
+    intent_type = state.get("intent_type", "chat")
+    raw_message = state.get("raw_message", "")
+
+    if intent_type == "chat":
+        prompt = CHAT_PROMPT.format(message=raw_message)
+        summary = _llm.invoke(prompt).content
+        return {"summary": summary}
 
     plan = state.get("plan", [])
     mock_results = state.get("mock_results", {})
-    lines = ["Phase 1 mock 结果："]
+    result_lines = []
     for step in plan:
         if step == "deliver":
             continue
         result = mock_results.get(step)
         if result:
-            lines.append(f"- {result['title']}：{result['preview']}")
+            result_lines.append(f"【{result['title']}】\n{result['preview']}")
 
-    return {"summary": "\n".join(lines)}
+    results_text = "\n\n".join(result_lines) if result_lines else "无执行结果"
+    prompt = DELIVER_PROMPT.format(
+        raw_message=raw_message,
+        intent_type=intent_type,
+        results=results_text,
+    )
+    summary = _llm.invoke(prompt).content
+    return {"summary": summary}

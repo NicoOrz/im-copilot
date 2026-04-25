@@ -1,32 +1,37 @@
+from pydantic import BaseModel, Field
+
+from im_copilot.llm import get_llm
 from im_copilot.state import PipelineState
 
+INTENT_PROMPT = """分析用户的输入消息，判断其意图类型。
 
-DOC_KEYWORDS = ("文档", "报告", "纪要", "方案")
-WHITEBOARD_KEYWORDS = ("白板", "流程图", "思维导图")
-SLIDE_KEYWORDS = ("PPT", "ppt", "幻灯片", "演示稿")
+可选意图：
+- create_doc: 用户想要创建文档、报告、纪要、方案等文字内容
+- create_whiteboard: 用户想要创建白板、流程图、思维导图等可视化内容
+- create_slide: 用户想要创建PPT、幻灯片、演示稿等
+- create_multi: 用户同时要求创建多种类型的内容（至少两种）
+- chat: 普通聊天，没有明确的内容创建需求
+
+用户消息：{message}
+
+请输出意图类型和提取的关键参数（如主题）。"""
 
 
-def _contains_any(message: str, keywords: tuple[str, ...]) -> bool:
-    return any(keyword in message for keyword in keywords)
+class IntentOutput(BaseModel):
+    intent_type: str = Field(
+        description="意图类型: create_doc | create_whiteboard | create_slide | create_multi | chat"
+    )
+    topic: str = Field(description="用户请求的主题或核心内容")
+
+
+_llm = get_llm().with_structured_output(IntentOutput)
 
 
 def intent_node(state: PipelineState) -> dict:
     raw_message = state.get("raw_message", "")
-    matches = {
-        "create_doc": _contains_any(raw_message, DOC_KEYWORDS),
-        "create_whiteboard": _contains_any(raw_message, WHITEBOARD_KEYWORDS),
-        "create_slide": _contains_any(raw_message, SLIDE_KEYWORDS),
-    }
-
-    matched_intents = [intent for intent, matched in matches.items() if matched]
-    if len(matched_intents) >= 2:
-        intent_type = "create_multi"
-    elif matched_intents:
-        intent_type = matched_intents[0]
-    else:
-        intent_type = "chat"
-
+    prompt = INTENT_PROMPT.format(message=raw_message)
+    result: IntentOutput = _llm.invoke(prompt)
     return {
-        "intent_type": intent_type,
-        "intent_params": {"topic": raw_message},
+        "intent_type": result.intent_type,
+        "intent_params": {"topic": result.topic},
     }
