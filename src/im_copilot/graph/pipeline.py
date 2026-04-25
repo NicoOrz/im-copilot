@@ -162,19 +162,19 @@ def run_pipeline(
     source: str = "cli",
     thread_id: str | None = None,
 ) -> PipelineState:
-    checkpointer = get_checkpointer()
-    graph = build_pipeline(checkpointer=checkpointer)
-    config = {"configurable": {"thread_id": thread_id or f"{chat_id}-{message_id}"}}
-    initial_state: PipelineState = {
-        "raw_message": message,
-        "chat_id": chat_id,
-        "message_id": message_id,
-        "source": source,
-        "errors": [],
-        "checks": [],
-        "reflection_iteration": 0,
-    }
-    return graph.invoke(initial_state, config=config)
+    with get_checkpointer() as checkpointer:
+        graph = build_pipeline(checkpointer=checkpointer)
+        config = {"configurable": {"thread_id": thread_id or f"{chat_id}-{message_id}"}}
+        initial_state: PipelineState = {
+            "raw_message": message,
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "source": source,
+            "errors": [],
+            "checks": [],
+            "reflection_iteration": 0,
+        }
+        return graph.invoke(initial_state, config=config)
 
 
 def debug_pipeline(message: str) -> None:

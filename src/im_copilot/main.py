@@ -2,8 +2,8 @@ import argparse
 import sys
 
 from langgraph.types import Command
-from langgraph.checkpoint.memory import InMemorySaver
 
+from im_copilot.checkpointer import get_checkpointer
 from im_copilot.graph.pipeline import build_pipeline, run_pipeline
 
 
@@ -27,10 +27,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.resume:
         import json
         decision = json.loads(args.resume)
-        checkpointer = InMemorySaver()
-        graph = build_pipeline(checkpointer=checkpointer)
-        config = {"configurable": {"thread_id": args.thread_id}}
-        result = graph.invoke(Command(resume=decision), config=config)
+        with get_checkpointer("sqlite") as checkpointer:
+            graph = build_pipeline(checkpointer=checkpointer)
+            config = {"configurable": {"thread_id": args.thread_id}}
+            result = graph.invoke(Command(resume=decision), config=config)
     else:
         result = run_pipeline(message, thread_id=args.thread_id)
 

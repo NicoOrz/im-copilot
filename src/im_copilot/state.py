@@ -61,3 +61,4 @@ class PipelineState(TypedDict, total=False):
     side_agent_results: Annotated[list[dict], add]
     thread_id: str
     user_id: str
+    pending_questions: list[str]

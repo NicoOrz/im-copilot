@@ -50,5 +50,4 @@ def plan_approval_node(state: PipelineState) -> dict:
             feedback=feedback,
             timestamp=now,
         )],
-        "errors": [f"计划被拒绝: {feedback}"],
     }
