@@ -17,7 +17,12 @@ CHAT_PROMPT = """你是一位友好的智能助手。请回复用户的聊天消
 
 请给出自然、有帮助的中文回复。"""
 
-_llm = get_llm()
+
+def _get_llm():
+    """Lazy-load the LLM client to avoid import-time construction."""
+    if not hasattr(_get_llm, "_instance"):
+        _get_llm._instance = get_llm()
+    return _get_llm._instance
 
 
 def deliver_node(state: PipelineState) -> dict:
@@ -30,16 +35,16 @@ def deliver_node(state: PipelineState) -> dict:
 
     if intent_type == "chat":
         prompt = CHAT_PROMPT.format(message=raw_message)
-        summary = _llm.invoke(prompt).content
+        summary = _get_llm().invoke(prompt).content
         return {"summary": summary}
 
     plan = state.get("plan", [])
-    mock_results = state.get("mock_results", {})
+    artifacts = state.get("artifacts", {})
     result_lines = []
     for step in plan:
         if step == "deliver":
             continue
-        result = mock_results.get(step)
+        result = artifacts.get(step)
         if result:
             result_lines.append(f"【{result['title']}】\n{result['preview']}")
 
@@ -49,5 +54,5 @@ def deliver_node(state: PipelineState) -> dict:
         intent_type=intent_type,
         results=results_text,
     )
-    summary = _llm.invoke(prompt).content
+    summary = _get_llm().invoke(prompt).content
     return {"summary": summary}

@@ -161,8 +161,9 @@ def run_pipeline(
     message_id: str = "cli",
     source: str = "cli",
     thread_id: str | None = None,
+    checkpointer_type: str | None = None,
 ) -> PipelineState:
-    with get_checkpointer() as checkpointer:
+    with get_checkpointer(checkpointer_type) as checkpointer:
         graph = build_pipeline(checkpointer=checkpointer)
         config = {"configurable": {"thread_id": thread_id or f"{chat_id}-{message_id}"}}
         initial_state: PipelineState = {
@@ -202,7 +203,7 @@ def debug_pipeline(message: str) -> None:
             print(f"--- Node: {node_name} ---")
             if isinstance(update, dict):
                 for key, value in update.items():
-                    if key == "mock_results":
+                    if key == "artifacts":
                         print(f"  {key}: {list(value.keys())}")
                     elif key == "summary" and isinstance(value, str):
                         preview = value[:80].replace("\n", " ")

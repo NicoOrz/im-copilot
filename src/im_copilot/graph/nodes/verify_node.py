@@ -26,24 +26,28 @@ class VerifyOutput(BaseModel):
     reason: str = Field(description="审核原因和修改建议")
 
 
-_llm = get_llm().with_structured_output(VerifyOutput)
+def _get_llm():
+    """Lazy-load the LLM client to avoid import-time construction."""
+    if not hasattr(_get_llm, "_instance"):
+        _get_llm._instance = get_llm().with_structured_output(VerifyOutput)
+    return _get_llm._instance
 
 
 def verify_node(state: PipelineState) -> dict:
     """Verify the most recently generated content.
 
-    Determines which step just completed by checking mock_results keys
+    Determines which step just completed by checking artifacts keys
     against the plan. Returns a CheckResult.
     """
     plan = state.get("plan", [])
-    mock_results = state.get("mock_results", {})
+    artifacts = state.get("artifacts", {})
     raw_message = state.get("raw_message", "")
     intent_type = state.get("intent_type", "chat")
 
     # Find the most recently completed task (last in plan that has a result)
     task = None
     for step in reversed(plan):
-        if step != "deliver" and step in mock_results:
+        if step != "deliver" and step in artifacts:
             task = step
             break
 
@@ -54,7 +58,7 @@ def verify_node(state: PipelineState) -> dict:
             "reflection_iteration": state.get("reflection_iteration", 0) + 1,
         }
 
-    result = mock_results[task]
+    result = artifacts[task]
     preview = result.get("preview", "")[:1000]  # Limit preview length
 
     prompt = VERIFY_PROMPT.format(
@@ -64,7 +68,7 @@ def verify_node(state: PipelineState) -> dict:
         preview=preview,
     )
 
-    output: VerifyOutput = _llm.invoke(prompt)
+    output: VerifyOutput = _get_llm().invoke(prompt)
 
     return {
         "checks": [CheckResult(task=task, status=output.status, reason=output.reason)],

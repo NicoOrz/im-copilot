@@ -24,13 +24,17 @@ class IntentOutput(BaseModel):
     topic: str = Field(description="用户请求的主题或核心内容")
 
 
-_llm = get_llm().with_structured_output(IntentOutput)
+def _get_llm():
+    """Lazy-load the LLM client to avoid import-time construction."""
+    if not hasattr(_get_llm, "_instance"):
+        _get_llm._instance = get_llm().with_structured_output(IntentOutput)
+    return _get_llm._instance
 
 
 def intent_node(state: PipelineState) -> dict:
     raw_message = state.get("raw_message", "")
     prompt = INTENT_PROMPT.format(message=raw_message)
-    result: IntentOutput = _llm.invoke(prompt)
+    result: IntentOutput = _get_llm().invoke(prompt)
     return {
         "intent_type": result.intent_type,
         "intent_params": {"topic": result.topic},

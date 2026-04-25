@@ -1,10 +1,11 @@
 import argparse
+import os
 import sys
 
 from langgraph.types import Command
 
 from im_copilot.checkpointer import get_checkpointer
-from im_copilot.graph.pipeline import build_pipeline, run_pipeline
+from im_copilot.graph.pipeline import build_pipeline
 
 
 USAGE = 'Usage: python -m im_copilot.main "<message>"'
@@ -23,16 +24,27 @@ def main(argv: list[str] | None = None) -> int:
 
     message = " ".join(args.message)
 
-    # If resuming from interrupt
-    if args.resume:
-        import json
-        decision = json.loads(args.resume)
-        with get_checkpointer("sqlite") as checkpointer:
-            graph = build_pipeline(checkpointer=checkpointer)
-            config = {"configurable": {"thread_id": args.thread_id}}
+    # Use the same persistent checkpointer for both initial and resume runs
+    cp_type = os.getenv("CHECKPOINTER_TYPE", "sqlite")
+    with get_checkpointer(cp_type) as checkpointer:
+        graph = build_pipeline(checkpointer=checkpointer)
+        config = {"configurable": {"thread_id": args.thread_id}}
+
+        if args.resume:
+            import json
+            decision = json.loads(args.resume)
             result = graph.invoke(Command(resume=decision), config=config)
-    else:
-        result = run_pipeline(message, thread_id=args.thread_id)
+        else:
+            initial_state = {
+                "raw_message": message,
+                "chat_id": "cli",
+                "message_id": "cli",
+                "source": "cli",
+                "errors": [],
+                "checks": [],
+                "reflection_iteration": 0,
+            }
+            result = graph.invoke(initial_state, config=config)
 
     # Handle interrupt output
     if "__interrupt__" in result:

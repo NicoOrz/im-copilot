@@ -13,7 +13,7 @@ IntentType = Literal[
 PlanStep = Literal["doc", "whiteboard", "slide", "deliver"]
 
 
-class MockResult(TypedDict):
+class ContentResult(TypedDict):
     kind: str
     title: str
     status: str
@@ -48,7 +48,7 @@ class PipelineState(TypedDict, total=False):
     intent_params: dict[str, str]
 
     plan: list[PlanStep]
-    mock_results: dict[str, MockResult]
+    artifacts: dict[str, ContentResult]
     checks: Annotated[list[CheckResult], add]
     summary: str
 

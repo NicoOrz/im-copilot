@@ -51,7 +51,11 @@ class PlannerOutput(BaseModel):
     )
 
 
-_llm = get_llm().with_structured_output(PlannerOutput)
+def _get_llm():
+    """Lazy-load the LLM client to avoid import-time construction."""
+    if not hasattr(_get_llm, "_instance"):
+        _get_llm._instance = get_llm().with_structured_output(PlannerOutput)
+    return _get_llm._instance
 
 
 def planner_node(state: PipelineState) -> dict:
@@ -73,7 +77,7 @@ def planner_node(state: PipelineState) -> dict:
         topic=topic,
         clarification_history=history_text,
     )
-    result: PlannerOutput = _llm.invoke(prompt)
+    result: PlannerOutput = _get_llm().invoke(prompt)
 
     if result.needs_clarification:
         return {

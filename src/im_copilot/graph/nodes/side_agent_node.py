@@ -36,7 +36,11 @@ class SideAgentOutput(BaseModel):
     )
 
 
-_llm = get_llm().with_structured_output(SideAgentOutput)
+def _get_llm():
+    """Lazy-load the LLM client to avoid import-time construction."""
+    if not hasattr(_get_llm, "_instance"):
+        _get_llm._instance = get_llm().with_structured_output(SideAgentOutput)
+    return _get_llm._instance
 
 
 def side_agent_node(state: PipelineState) -> dict:
@@ -45,21 +49,21 @@ def side_agent_node(state: PipelineState) -> dict:
     Runs alongside verify_node to provide additional validation.
     """
     plan = state.get("plan", [])
-    mock_results = state.get("mock_results", {})
+    artifacts = state.get("artifacts", {})
     raw_message = state.get("raw_message", "")
     intent_type = state.get("intent_type", "chat")
 
     # Find the most recently completed task
     task = None
     for step in reversed(plan):
-        if step != "deliver" and step in mock_results:
+        if step != "deliver" and step in artifacts:
             task = step
             break
 
     if not task:
         return {"side_agent_results": [{"task": "none", "status": "no_content"}]}
 
-    result = mock_results[task]
+    result = artifacts[task]
     preview = result.get("preview", "")[:1000]
 
     prompt = SIDE_AGENT_PROMPT.format(
@@ -69,7 +73,7 @@ def side_agent_node(state: PipelineState) -> dict:
         preview=preview,
     )
 
-    output: SideAgentOutput = _llm.invoke(prompt)
+    output: SideAgentOutput = _get_llm().invoke(prompt)
 
     return {
         "side_agent_results": [{
