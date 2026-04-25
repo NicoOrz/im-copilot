@@ -6,6 +6,7 @@ from im_copilot.graph.nodes.doc_node import doc_node
 from im_copilot.graph.nodes.intent_node import intent_node
 from im_copilot.graph.nodes.planner_node import planner_node
 from im_copilot.graph.nodes.slide_node import slide_node
+from im_copilot.graph.nodes.side_agent_node import side_agent_node
 from im_copilot.graph.nodes.verify_node import verify_node
 from im_copilot.graph.nodes.whiteboard_node import whiteboard_node
 
@@ -41,15 +42,34 @@ class IntentNodeTests(unittest.TestCase):
 class PlannerNodeTests(unittest.TestCase):
     @patch("im_copilot.graph.nodes.planner_node._llm")
     def test_maps_multi_intent_to_all_business_steps(self, mock_llm):
-        mock_llm.invoke.return_value = MagicMock(plan=["doc", "whiteboard", "slide", "deliver"])
+        mock_llm.invoke.return_value = MagicMock(
+            plan=["doc", "whiteboard", "slide", "deliver"],
+            needs_clarification=False,
+            questions=[],
+        )
         result = planner_node({"intent_type": "create_multi"})
         self.assertEqual(result["plan"], ["doc", "whiteboard", "slide", "deliver"])
 
     @patch("im_copilot.graph.nodes.planner_node._llm")
     def test_maps_chat_to_deliver_only(self, mock_llm):
-        mock_llm.invoke.return_value = MagicMock(plan=["deliver"])
+        mock_llm.invoke.return_value = MagicMock(
+            plan=["deliver"],
+            needs_clarification=False,
+            questions=[],
+        )
         result = planner_node({"intent_type": "chat"})
         self.assertEqual(result["plan"], ["deliver"])
+
+    @patch("im_copilot.graph.nodes.planner_node._llm")
+    def test_needs_clarification(self, mock_llm):
+        mock_llm.invoke.return_value = MagicMock(
+            plan=[],
+            needs_clarification=True,
+            questions=["目标受众是谁？", "需要什么格式？"],
+        )
+        result = planner_node({"intent_type": "create_doc"})
+        self.assertEqual(result["plan"], [])
+        self.assertEqual(result["pending_questions"], ["目标受众是谁？", "需要什么格式？"])
 
 
 class MockNodeTests(unittest.TestCase):
@@ -126,6 +146,32 @@ class VerifyNodeTests(unittest.TestCase):
         result = verify_node({"plan": ["deliver"], "mock_results": {}})
         self.assertEqual(result["checks"][0]["status"], "pass")
         self.assertEqual(result["checks"][0]["task"], "none")
+
+
+class SideAgentNodeTests(unittest.TestCase):
+    @patch("im_copilot.graph.nodes.side_agent_node._llm")
+    def test_side_agent_evaluates_content(self, mock_llm):
+        mock_llm.invoke.return_value = MagicMock(
+            validation_score=0.95,
+            relevance="高度相关",
+            completeness="完整",
+            accuracy="准确",
+            readability="清晰",
+            issues=[],
+        )
+        result = side_agent_node({
+            "plan": ["doc", "deliver"],
+            "mock_results": {"doc": {"kind": "doc", "title": "t", "status": "created", "preview": "content"}},
+            "raw_message": "写文档",
+            "intent_type": "create_doc",
+        })
+        self.assertEqual(len(result["side_agent_results"]), 1)
+        self.assertEqual(result["side_agent_results"][0]["task"], "doc")
+        self.assertEqual(result["side_agent_results"][0]["validation_score"], 0.95)
+
+    def test_side_agent_no_content(self):
+        result = side_agent_node({"plan": ["deliver"], "mock_results": {}})
+        self.assertEqual(result["side_agent_results"][0]["task"], "none")
 
 
 if __name__ == "__main__":
