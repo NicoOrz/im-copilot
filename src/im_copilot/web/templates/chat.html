@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+
+{% block title %}IM Copilot - Chat{% endblock %}
+
+{% block content %}
+<aside class="sidebar">
+    <div class="sidebar-header">
+        <h1>IM Copilot</h1>
+        <button id="new-session-btn" class="btn btn-primary">+ 新会话</button>
+    </div>
+    <div class="session-list" id="session-list">
+        {% for session in sessions %}
+        <div class="session-item {% if thread_id == session.thread_id %}active{% endif %}" data-thread-id="{{ session.thread_id }}">
+            <span class="session-name">会话 {{ session.thread_id[:8] }}</span>
+            <button class="session-delete" data-thread-id="{{ session.thread_id }}">×</button>
+        </div>
+        {% endfor %}
+    </div>
+</aside>
+
+<main class="chat-container">
+    <div class="chat-header">
+        <span id="current-thread">{% if thread_id %}会话 {{ thread_id[:8] }}{% else %}请选择一个会话{% endif %}</span>
+    </div>
+
+    <div class="chat-messages" id="chat-messages">
+        <div class="welcome-message">
+            <h2>欢迎使用 IM Copilot</h2>
+            <p>发送消息开始对话。我可以帮你写文档、画白板、做PPT。</p>
+        </div>
+    </div>
+
+    <div class="chat-input-area">
+        <div class="typing-indicator" id="typing-indicator" style="display: none;">
+            <span></span><span></span><span></span>
+        </div>
+        <form id="chat-form" class="chat-form">
+            <input type="text" id="message-input" class="message-input" placeholder="输入消息..." autocomplete="off" {% if not thread_id %}disabled{% endif %}>
+            <button type="submit" class="btn btn-send" {% if not thread_id %}disabled{% endif %}>发送</button>
+        </form>
+    </div>
+</main>
+
+<!-- Interrupt Modal -->
+<div class="modal-overlay" id="interrupt-modal" style="display: none;">
+    <div class="modal">
+        <div class="modal-header">
+            <h3 id="modal-title">需要确认</h3>
+        </div>
+        <div class="modal-body" id="modal-body">
+        </div>
+        <div class="modal-footer" id="modal-footer">
+        </div>
+    </div>
+</div>
+
+<script>
+window.CURRENT_THREAD_ID = {{ thread_id | tojson }};
+</script>
+{% endblock %}

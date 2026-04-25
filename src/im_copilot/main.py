@@ -16,7 +16,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("message", nargs="*", help="User message")
     parser.add_argument("--thread-id", default="cli", help="Conversation thread ID")
     parser.add_argument("--resume", default=None, help="Resume from interrupt with JSON decision")
+    parser.add_argument("--web", action="store_true", help="Launch web UI server")
+    parser.add_argument("--host", default="0.0.0.0", help="Web server host")
+    parser.add_argument("--port", type=int, default=8000, help="Web server port")
     args = parser.parse_args(argv)
+
+    if args.web:
+        return _run_web_server(args.host, args.port)
 
     if not args.message:
         print(USAGE)
@@ -66,6 +72,15 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     print(result.get("summary", ""))
+    return 0
+
+
+def _run_web_server(host: str, port: int) -> int:
+    import uvicorn
+    from im_copilot.web.app import app
+
+    print(f"Starting IM Copilot web server at http://{host}:{port}")
+    uvicorn.run(app, host=host, port=port, log_level="info")
     return 0
 
 
