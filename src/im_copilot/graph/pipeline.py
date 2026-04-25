@@ -83,3 +83,54 @@ def run_pipeline(
         "checks": [],
     }
     return graph.invoke(initial_state)
+
+
+def debug_pipeline(message: str) -> None:
+    """Stream the graph execution and print each step's state updates."""
+    graph = build_pipeline()
+    initial_state: PipelineState = {
+        "raw_message": message,
+        "chat_id": "cli",
+        "message_id": "cli",
+        "source": "cli",
+        "errors": [],
+        "checks": [],
+    }
+    print(f"{'='*60}")
+    print(f"Input: {message!r}")
+    print(f"{'='*60}\n")
+    for step in graph.stream(initial_state, stream_mode="updates"):
+        for node_name, update in step.items():
+            print(f"--- Node: {node_name} ---")
+            for key, value in update.items():
+                if key == "mock_results":
+                    print(f"  {key}: {list(value.keys())}")
+                elif key == "summary" and isinstance(value, str):
+                    preview = value[:80].replace("\n", " ")
+                    print(f"  {key}: {preview}...")
+                else:
+                    print(f"  {key}: {value}")
+            print()
+    print(f"{'='*60}")
+    print("Pipeline complete")
+    print(f"{'='*60}")
+
+
+def draw_mermaid() -> str:
+    """Return a Mermaid diagram of the graph structure."""
+    return """
+graph TD
+    START --> intent
+    intent --> planner
+    planner -->|plan has doc| doc
+    planner -->|plan has whiteboard| whiteboard
+    planner -->|plan has slide| slide
+    planner -->|chat only| deliver
+    doc -->|plan has whiteboard| whiteboard
+    doc -->|plan has slide| slide
+    doc -->|otherwise| deliver
+    whiteboard -->|plan has slide| slide
+    whiteboard -->|otherwise| deliver
+    slide --> deliver
+    deliver --> END
+""".strip()
