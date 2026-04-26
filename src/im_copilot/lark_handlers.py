@@ -9,7 +9,16 @@ from __future__ import annotations
 
 import json
 import logging
+from functools import partial
 from typing import Any
+
+import lark_oapi as lark
+from lark_oapi.api.im.v1.model.p2_im_message_receive_v1 import P2ImMessageReceiveV1
+from lark_oapi.event.callback.model.p2_card_action_trigger import (
+    CallBackToast,
+    P2CardActionTrigger,
+    P2CardActionTriggerResponse,
+)
 
 from im_copilot.checkpointer import get_checkpointer
 from im_copilot.graph.pipeline import build_pipeline
@@ -41,7 +50,7 @@ def _is_interrupt_update(step: dict[str, Any]) -> bool:
 
 
 def _get_interrupt_info(step: dict[str, Any]) -> dict[str, Any] | None:
-    """Extract interrupt payload from a stream step, if present."""
+    """Extract interrupt payload from a stream step or state dict, if present."""
     interrupt_data = step.get("__interrupt__")
     if interrupt_data is None:
         return None
@@ -161,25 +170,34 @@ def _finalize_card(
     lark_bot.send_card(chat_id, card)
 
 
-def on_message_receive(data: dict[str, Any]) -> None:
+def _make_card_response(toast: str | None = None) -> P2CardActionTriggerResponse:
+    """Build a card action response with an optional toast message."""
+    resp = P2CardActionTriggerResponse()
+    if toast:
+        t = CallBackToast()
+        t.type = "info"
+        t.content = toast
+        resp.toast = t
+    return resp
+
+
+def on_message_receive(data: P2ImMessageReceiveV1, lark_bot: LarkBot) -> None:
     """Handle ``im.message.receive_v1`` events from Feishu.
 
     Extracts the text message, starts the LangGraph pipeline in streaming
     mode, and drives the interactive card lifecycle.
     """
-    lark_bot: LarkBot = data.get("_lark_bot")
-    if lark_bot is None:
-        logger.error("Missing _lark_bot in event data")
+    if data.event is None or data.event.message is None:
+        logger.error("Invalid message event: missing event or message")
         return
 
-    event = data.get("event", {})
-    message = event.get("message", {})
-    content_raw = message.get("content", "{}")
+    message = data.event.message
+    content_raw = message.content or "{}"
     text = _extract_text_content(content_raw)
 
-    chat_id = message.get("chat_id", "")
-    message_id = message.get("message_id", "")
-    chat_type = message.get("chat_type", "")
+    chat_id = message.chat_id or ""
+    message_id = message.message_id or ""
+    chat_type = message.chat_type or ""
 
     if not chat_id:
         logger.error("Missing chat_id in message event")
@@ -246,37 +264,32 @@ def on_message_receive(data: dict[str, Any]) -> None:
         session_manager.delete_session(thread_id)
 
 
-def on_card_action(data: dict[str, Any]) -> None:
+def on_card_action(
+    data: P2CardActionTrigger,
+    lark_bot: LarkBot,
+) -> P2CardActionTriggerResponse:
     """Handle card action trigger events from Feishu.
 
     Parses the user's button click, retrieves the saved session, resumes the
     pipeline with the user's decision, and continues streaming updates.
     """
-    lark_bot: LarkBot = data.get("_lark_bot")
-    if lark_bot is None:
-        logger.error("Missing _lark_bot in card action data")
-        return
+    if data.event is None:
+        logger.error("Invalid card action event: missing event")
+        return _make_card_response("无效的操作事件")
 
-    event = data.get("event", {})
-    action = event.get("action", {})
-    action_value = action.get("value", {})
+    action_value = (data.event.action.value or {}) if data.event.action else {}
     user_action = action_value.get("action", "")
 
-    # thread_id is passed in the card callback context
-    open_message_id = event.get("open_message_id", "")
-    open_chat_id = event.get("open_chat_id", "")
-    # Prefer open_chat_id as thread_id; fallback to extracting from context
-    thread_id = open_chat_id or open_message_id
-
+    context = data.event.context
+    thread_id = context.open_chat_id if context else ""
     if not thread_id:
         logger.error("Cannot resolve thread_id from card action event")
-        return
+        return _make_card_response("无法识别会话")
 
     session = session_manager.get_session(thread_id)
     if session is None:
         logger.warning("No active session for thread_id=%s", thread_id)
-        lark_bot.send_text(thread_id, "会话已过期，请重新发起请求。")
-        return
+        return _make_card_response("会话已过期，请重新发起请求。")
 
     # Build decision payload based on action type
     if user_action == "approve":
@@ -285,24 +298,37 @@ def on_card_action(data: dict[str, Any]) -> None:
         decision = {"approved": False, "feedback": "用户拒绝执行计划"}
     elif user_action == "clarify":
         question = action_value.get("question", "")
-        # For clarification, the user clicked a specific question button.
-        # In a real implementation the bot might ask for free-text input;
-        # here we treat the click as acknowledging that question.
-        decision = {"answers": [question]}
+        question_index = action_value.get("question_index", 0)
+        last_interrupt = session.get("last_interrupt", {})
+        questions = last_interrupt.get("questions", [])
+        answers = [""] * len(questions) if questions else [""]
+        if answers:
+            answers[min(question_index, len(answers) - 1)] = question
+        decision = {"answers": answers}
     else:
         logger.warning("Unknown card action: %s", user_action)
-        return
+        return _make_card_response("未知操作")
 
     try:
         # Resume the graph with the user's decision
         result = session_manager.resume_session(thread_id, decision)
-        final_state: dict[str, Any] = result if isinstance(result, dict) else {}
 
-        # After resume, the graph may hit another interrupt or finish.
-        # We re-stream from the resumed state to catch any further updates.
+        # Check if the resume hit another interrupt immediately
+        if isinstance(result, dict) and _get_interrupt_info(result) is not None:
+            interrupt_info = _get_interrupt_info(result)
+            if interrupt_info:
+                session_manager.update_session(
+                    thread_id,
+                    last_interrupt=interrupt_info,
+                )
+                _update_card_for_interrupt(lark_bot, session, interrupt_info)
+            return _make_card_response("已收到您的反馈")
+
+        # Continue streaming from the resumed state to catch any remaining steps
         graph = session["graph"]
         config = session["config"]
         stream = graph.stream(None, config=config, stream_mode="updates")
+        final_state: dict[str, Any] = result if isinstance(result, dict) else {}
 
         for step in stream:
             if _is_interrupt_update(step):
@@ -313,27 +339,27 @@ def on_card_action(data: dict[str, Any]) -> None:
                         last_interrupt=interrupt_info,
                     )
                     _update_card_for_interrupt(lark_bot, session, interrupt_info)
-                return
+                return _make_card_response("已收到您的反馈")
 
             for node_name, update in step.items():
-                final_state = update if isinstance(update, dict) else {}
+                final_state = update if isinstance(update, dict) else final_state
                 detail = f"节点 {node_name} 执行中..."
                 _update_progress_card(lark_bot, session, node_name, detail)
 
         _finalize_card(lark_bot, session, final_state)
         session_manager.delete_session(thread_id)
+        return _make_card_response("处理完成")
 
     except Exception as exc:
         logger.exception("Resume error for thread_id=%s", thread_id)
         lark_bot.send_text(thread_id, f"继续处理时出错：{exc}")
         session_manager.delete_session(thread_id)
+        return _make_card_response(f"处理出错：{exc}")
 
 
-def build_event_handler(lark_bot: LarkBot) -> Any:
-    """Build and return the WebSocket event handler callable.
-
-    The returned callable accepts a raw event dict and dispatches to the
-    appropriate handler based on the event type.
+def build_event_handler(lark_bot: LarkBot) -> lark.EventDispatcherHandler:
+    """Build and return a ``lark.EventDispatcherHandler`` with both handlers
+    registered.
 
     Parameters
     ----------
@@ -342,20 +368,19 @@ def build_event_handler(lark_bot: LarkBot) -> Any:
 
     Returns
     -------
-    Callable
-        A function suitable for passing to ``LarkBot.start_ws``.
+    lark.EventDispatcherHandler
+        A dispatcher ready to handle Feishu events.
     """
-
-    def _handler(data: dict[str, Any]) -> None:
-        # Inject the bot instance so handlers can use it without globals
-        data["_lark_bot"] = lark_bot
-        event_type = data.get("header", {}).get("event_type", "")
-
-        if event_type == "im.message.receive_v1":
-            on_message_receive(data)
-        elif event_type == "card.action.trigger":
-            on_card_action(data)
-        else:
-            logger.debug("Unhandled event type: %s", event_type)
-
-    return _handler
+    return (
+        lark.EventDispatcherHandler.builder(
+            lark_bot._encrypt_key,
+            lark_bot._verification_token,
+        )
+        .register_p2_im_message_receive_v1(
+            partial(on_message_receive, lark_bot=lark_bot)
+        )
+        .register_p2_card_action_trigger(
+            partial(on_card_action, lark_bot=lark_bot)
+        )
+        .build()
+    )
