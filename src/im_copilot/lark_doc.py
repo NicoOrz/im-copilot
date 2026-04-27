@@ -38,6 +38,9 @@ class LarkDocClient:
         env = os.environ.copy()
         if self._uat:
             env["LARKSUITE_CLI_USER_ACCESS_TOKEN"] = self._uat
+            app_id = os.environ.get("LARK_APP_ID") or os.environ.get("FEISHU_APP_ID", "")
+            if app_id:
+                env["LARKSUITE_CLI_APP_ID"] = app_id
         try:
             result = subprocess.run(
                 cmd,
@@ -330,6 +333,9 @@ class LarkDocClient:
         env = os.environ.copy()
         if self._uat:
             env["LARKSUITE_CLI_USER_ACCESS_TOKEN"] = self._uat
+            app_id = os.environ.get("LARK_APP_ID") or os.environ.get("FEISHU_APP_ID", "")
+            if app_id:
+                env["LARKSUITE_CLI_APP_ID"] = app_id
         logger.info("Updating whiteboard %s (mermaid length=%d)", whiteboard_token, len(mermaid))
         try:
             result = subprocess.run(
