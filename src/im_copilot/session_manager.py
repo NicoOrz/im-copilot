@@ -32,6 +32,8 @@ class SessionManager:
         graph,
         config: dict,
         card_id: str | None = None,
+        card_entity_id: str | None = None,
+        chat_id: str | None = None,
     ) -> dict:
         """Save a new session and return its data.
 
@@ -40,15 +42,19 @@ class SessionManager:
             graph: A compiled LangGraph (``CompiledStateGraph``).
             config: LangGraph config, e.g. ``{"configurable": {"thread_id": ...}}``.
             card_id: Optional Feishu card message ID for later updates.
+            card_entity_id: Optional Feishu card entity ID for streaming updates.
 
         Returns:
             The session dictionary.
         """
         session = {
             "thread_id": thread_id,
+            "chat_id": chat_id or thread_id,
             "graph": graph,
             "config": config,
             "card_id": card_id,
+            "card_message_id": card_id,
+            "card_entity_id": card_entity_id,
             "last_interrupt": None,
             "sequence": 0,
             "created_at": time.time(),

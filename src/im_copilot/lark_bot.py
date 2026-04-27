@@ -20,6 +20,8 @@ from lark_oapi.api.auth.v3 import (
 from lark_oapi.api.im.v1 import (
     CreateMessageRequestBodyBuilder,
     CreateMessageRequestBuilder,
+    PatchMessageRequestBodyBuilder,
+    PatchMessageRequestBuilder,
     ReplyMessageRequestBodyBuilder,
     ReplyMessageRequestBuilder,
 )
@@ -27,19 +29,6 @@ from lark_oapi.core.exception import ObtainAccessTokenException
 from lark_oapi.core.token import TokenManager
 
 logger = logging.getLogger(__name__)
-
-
-class _CallableEventHandler:
-    """Wraps a plain callable into an object that satisfies the WS client's
-    ``do_without_validation`` interface.
-    """
-
-    def __init__(self, fn: Callable[[dict[str, Any]], Any]) -> None:
-        self._fn = fn
-
-    def do_without_validation(self, payload: bytes) -> Any:
-        data = json.loads(payload.decode("utf-8"))
-        return self._fn(data)
 
 
 class LarkBot:
@@ -66,19 +55,21 @@ class LarkBot:
         encrypt_key: str | None = None,
         verification_token: str | None = None,
         domain: str = lark.FEISHU_DOMAIN,
+        debug: bool = False,
     ) -> None:
         self._app_id = app_id
         self._app_secret = app_secret
         self._encrypt_key = encrypt_key or ""
         self._verification_token = verification_token or ""
         self._domain = domain.rstrip("/")
+        self._debug = debug
 
         self._client = (
             lark.Client.builder()
             .app_id(app_id)
             .app_secret(app_secret)
             .domain(domain)
-            .log_level(lark.LogLevel.WARNING)
+            .log_level(lark.LogLevel.DEBUG if debug else lark.LogLevel.WARNING)
             .build()
         )
 
@@ -89,6 +80,7 @@ class LarkBot:
     def _get_tenant_access_token(self) -> str:
         """Obtain a tenant access token, using the SDK token manager cache."""
         try:
+            logger.debug("Obtaining tenant access token")
             return TokenManager.get_self_tenant_token(self._client._config)
         except ObtainAccessTokenException:
             raise
@@ -132,6 +124,7 @@ class LarkBot:
         dict
             API response with ``code``, ``msg``, and ``data``.
         """
+        logger.debug("send_text start: chat_id=%s text_len=%s", chat_id, len(text))
         content = json.dumps({"text": text}, ensure_ascii=False)
         body = (
             CreateMessageRequestBodyBuilder()
@@ -182,6 +175,7 @@ class LarkBot:
         dict
             API response with ``code``, ``msg``, and ``data``.
         """
+        logger.debug("reply_text start: message_id=%s text_len=%s", message_id, len(text))
         content = json.dumps({"text": text}, ensure_ascii=False)
         body = (
             ReplyMessageRequestBodyBuilder()
@@ -231,6 +225,7 @@ class LarkBot:
         dict
             API response with ``code``, ``msg``, and ``data``.
         """
+        logger.debug("send_card start: chat_id=%s card_keys=%s", chat_id, list(card_json.keys()))
         content = json.dumps(card_json, ensure_ascii=False)
         body = (
             CreateMessageRequestBodyBuilder()
@@ -281,6 +276,7 @@ class LarkBot:
         dict
             API response with ``code``, ``msg``, and ``data``.
         """
+        logger.debug("reply_card start: message_id=%s card_keys=%s", message_id, list(card_json.keys()))
         content = json.dumps(card_json, ensure_ascii=False)
         body = (
             ReplyMessageRequestBodyBuilder()
@@ -316,8 +312,86 @@ class LarkBot:
             return {"code": -1, "msg": str(exc), "data": None}
 
     # --------------------------------------------------------------------- #
-    # Card stream updates
+    # Card entity & stream updates (for LLM streaming)
     # --------------------------------------------------------------------- #
+
+    def create_card_entity(self, card_json: dict[str, Any]) -> dict[str, Any]:
+        """Create a card entity and return its card_id.
+
+        This is required for streaming text updates via cardkit API.
+        """
+        logger.debug("create_card_entity start: card_keys=%s", list(card_json.keys()))
+        token = self._get_tenant_access_token()
+        url = f"{self._domain}/open-apis/cardkit/v1/cards"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json; charset=utf-8",
+        }
+        payload = {
+            "type": "card_json",
+            "data": json.dumps(card_json, ensure_ascii=False),
+        }
+
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=30)
+            response.raise_for_status()
+            result = response.json()
+            if result.get("code") != 0:
+                logger.error(
+                    "create_card_entity failed: code=%s msg=%s",
+                    result.get("code"),
+                    result.get("msg"),
+                )
+            else:
+                logger.info("create_card_entity success")
+            return result
+        except requests.HTTPError as exc:
+            logger.error("create_card_entity HTTP error: %s", exc)
+            return {"code": exc.response.status_code, "msg": str(exc), "data": None}
+        except Exception as exc:
+            logger.exception("create_card_entity unexpected error")
+            return {"code": -1, "msg": str(exc), "data": None}
+
+    def send_card_entity(self, chat_id: str, card_id: str) -> dict[str, Any]:
+        """Send a card entity (created via create_card_entity) to a chat."""
+        logger.debug("send_card_entity start: chat_id=%s card_id=%s", chat_id, card_id)
+        content = json.dumps(
+            {"type": "card", "data": {"card_id": card_id}},
+            ensure_ascii=False,
+        )
+        body = (
+            CreateMessageRequestBodyBuilder()
+            .receive_id(chat_id)
+            .msg_type("interactive")
+            .content(content)
+            .build()
+        )
+        req = (
+            CreateMessageRequestBuilder()
+            .receive_id_type("chat_id")
+            .request_body(body)
+            .build()
+        )
+
+        try:
+            resp = self._client.im.v1.message.create(req)
+            result = self._unwrap_response(resp)
+            if not resp.success():
+                logger.error(
+                    "send_card_entity failed: code=%s msg=%s chat_id=%s",
+                    resp.code,
+                    resp.msg,
+                    chat_id,
+                )
+            else:
+                logger.info("send_card_entity success: chat_id=%s", chat_id)
+            return result
+        except ObtainAccessTokenException as exc:
+            logger.error("send_card_entity auth error: %s", exc)
+            return {"code": exc.code, "msg": str(exc), "data": None}
+        except Exception as exc:
+            logger.exception("send_card_entity unexpected error: chat_id=%s", chat_id)
+            return {"code": -1, "msg": str(exc), "data": None}
 
     def update_card_stream(
         self,
@@ -326,27 +400,26 @@ class LarkBot:
         content: str,
         sequence: int,
     ) -> dict[str, Any]:
-        """Stream-update card content via the cardkit API.
-
-        This calls the Feishu OpenAPI directly using ``requests`` because the
-        cardkit stream endpoint may not be available in the SDK.
+        """Stream-update card element content via cardkit API.
 
         Parameters
         ----------
         card_id:
-            The card identifier.
+            The card entity ID (1-20 chars), NOT message_id.
         element_id:
             The element within the card to update.
         content:
-            The new content string.
+            The new full text content.
         sequence:
             Monotonic sequence number for the stream.
-
-        Returns
-        -------
-        dict
-            API response with ``code``, ``msg``, and ``data``.
         """
+        logger.debug(
+            "update_card_stream start: card_id=%s element_id=%s sequence=%s content_len=%s",
+            card_id,
+            element_id,
+            sequence,
+            len(content),
+        )
         token = self._get_tenant_access_token()
         url = (
             f"{self._domain}/open-apis/cardkit/v1/cards/"
@@ -362,12 +435,7 @@ class LarkBot:
         }
 
         try:
-            response = requests.put(
-                url,
-                headers=headers,
-                json=payload,
-                timeout=30,
-            )
+            response = requests.put(url, headers=headers, json=payload, timeout=30)
             response.raise_for_status()
             result = response.json()
             if result.get("code") != 0:
@@ -378,13 +446,6 @@ class LarkBot:
                     card_id,
                     element_id,
                 )
-            else:
-                logger.info(
-                    "update_card_stream success: card_id=%s element_id=%s sequence=%s",
-                    card_id,
-                    element_id,
-                    sequence,
-                )
             return result
         except requests.HTTPError as exc:
             logger.error(
@@ -394,14 +455,6 @@ class LarkBot:
                 element_id,
             )
             return {"code": exc.response.status_code, "msg": str(exc), "data": None}
-        except requests.RequestException as exc:
-            logger.error(
-                "update_card_stream request error: %s card_id=%s element_id=%s",
-                exc,
-                card_id,
-                element_id,
-            )
-            return {"code": -1, "msg": str(exc), "data": None}
         except Exception as exc:
             logger.exception(
                 "update_card_stream unexpected error: card_id=%s element_id=%s",
@@ -410,26 +463,83 @@ class LarkBot:
             )
             return {"code": -1, "msg": str(exc), "data": None}
 
+    def patch_message(
+        self,
+        message_id: str,
+        content: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Update an existing message (including interactive cards).
+
+        Uses the Feishu ``im.message.patch`` OpenAPI to replace the entire
+        message content. This is more reliable than cardkit stream updates
+        because it does not require a separate card entity ID.
+
+        Parameters
+        ----------
+        message_id:
+            The ID of the message to update.
+        content:
+            The new message content dict. For interactive cards this should be
+            the card JSON payload.
+
+        Returns
+        -------
+        dict
+            API response with ``code``, ``msg``, and ``data``.
+        """
+        logger.debug("patch_message start: message_id=%s content_keys=%s", message_id, list(content.keys()))
+        content_json = json.dumps(content, ensure_ascii=False)
+        body = (
+            PatchMessageRequestBodyBuilder()
+            .content(content_json)
+            .build()
+        )
+        req = (
+            PatchMessageRequestBuilder()
+            .message_id(message_id)
+            .request_body(body)
+            .build()
+        )
+
+        try:
+            resp = self._client.im.v1.message.patch(req)
+            result = self._unwrap_response(resp)
+            if not resp.success():
+                logger.error(
+                    "patch_message failed: code=%s msg=%s message_id=%s",
+                    resp.code,
+                    resp.msg,
+                    message_id,
+                )
+            else:
+                logger.info("patch_message success: message_id=%s", message_id)
+            return result
+        except ObtainAccessTokenException as exc:
+            logger.error("patch_message auth error: %s", exc)
+            return {"code": exc.code, "msg": str(exc), "data": None}
+        except Exception as exc:
+            logger.exception("patch_message unexpected error: message_id=%s", message_id)
+            return {"code": -1, "msg": str(exc), "data": None}
+
     # --------------------------------------------------------------------- #
     # WebSocket
     # --------------------------------------------------------------------- #
 
-    def start_ws(self, event_handler: Callable[[dict[str, Any]], Any]) -> None:
+    def start_ws(self, event_handler: lark.EventDispatcherHandler) -> None:
         """Start the WebSocket client to receive real-time events.
 
         Parameters
         ----------
         event_handler:
-            A callable that receives event payloads as dicts.
+            A ``lark.EventDispatcherHandler`` built via ``build_event_handler``.
             This method blocks while the connection is alive.
         """
-        handler = _CallableEventHandler(event_handler)
         ws_client = lark.ws.Client(
             app_id=self._app_id,
             app_secret=self._app_secret,
-            event_handler=handler,
+            event_handler=event_handler,
             domain=self._domain,
             auto_reconnect=True,
         )
-        logger.info("Starting Lark WebSocket client for app_id=%s", self._app_id)
+        logger.info("Starting Lark WebSocket client for app_id=%s debug=%s", self._app_id, self._debug)
         ws_client.start()
