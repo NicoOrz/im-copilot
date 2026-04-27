@@ -9,14 +9,50 @@ from __future__ import annotations
 def _base_card() -> dict:
     """Return the common card envelope with streaming flags."""
     return {
+        "schema": "2.0",
         "config": {
             "streaming_mode": True,
             "update_multi": True,
         },
-        "card_link": {},
         "header": {},
-        "elements": [],
+        "body": {
+            "direction": "vertical",
+            "padding": "12px 12px 12px 12px",
+            "elements": [],
+        },
     }
+
+
+def create_streaming_card(title: str = "思考中...") -> dict:
+    """Return a streaming card for LLM output.
+
+    Args:
+        title: The header title.
+
+    Returns:
+        A Feishu CardKit V2 dict with a markdown element (element_id="stream_md")
+        for streaming text updates.
+    """
+    card = _base_card()
+    card["header"] = {
+        "title": {
+            "tag": "plain_text",
+            "content": title,
+        },
+        "template": "blue",
+        "padding": "12px 12px 12px 12px",
+    }
+    card["body"]["elements"] = [
+        {
+            "tag": "markdown",
+            "element_id": "stream_md",
+            "content": "",
+            "text_align": "left",
+            "text_size": "normal_v2",
+            "margin": "0px 0px 0px 0px",
+        },
+    ]
+    return card
 
 
 def create_progress_card(title: str = "正在处理...") -> dict:
@@ -36,12 +72,16 @@ def create_progress_card(title: str = "正在处理...") -> dict:
             "content": "处理进度",
         },
         "template": "blue",
+        "padding": "12px 12px 12px 12px",
     }
-    card["elements"] = [
+    card["body"]["elements"] = [
         {
             "tag": "markdown",
             "element_id": "progress_md",
             "content": f"**{title}**",
+            "text_align": "left",
+            "text_size": "normal_v2",
+            "margin": "0px 0px 0px 0px",
         },
         {
             "tag": "div",
@@ -50,6 +90,7 @@ def create_progress_card(title: str = "正在处理...") -> dict:
                 "tag": "plain_text",
                 "content": "准备开始...",
             },
+            "margin": "0px 0px 0px 0px",
         },
     ]
     return card
@@ -59,6 +100,7 @@ def create_approval_card(
     plan: list[str],
     intent_type: str,
     intent_params: dict,
+    thread_id: str | None = None,
 ) -> dict:
     """Return an interactive approval card.
 
@@ -86,41 +128,48 @@ def create_approval_card(
             "content": "需要您的确认",
         },
         "template": "orange",
+        "padding": "12px 12px 12px 12px",
     }
-    card["elements"] = [
+    card["body"]["elements"] = [
         {
             "tag": "markdown",
             "element_id": "approval_md",
             "content": content,
+            "text_align": "left",
+            "text_size": "normal_v2",
+            "margin": "0px 0px 0px 0px",
         },
         {
-            "tag": "action",
-            "actions": [
-                {
-                    "tag": "button",
-                    "text": {
-                        "tag": "plain_text",
-                        "content": "✅ 同意",
-                    },
-                    "type": "primary",
-                    "value": {"action": "approve"},
-                },
-                {
-                    "tag": "button",
-                    "text": {
-                        "tag": "plain_text",
-                        "content": "❌ 拒绝",
-                    },
-                    "type": "danger",
-                    "value": {"action": "reject"},
-                },
+            "tag": "button",
+            "element_id": "approve_btn",
+            "text": {
+                "tag": "plain_text",
+                "content": "✅ 同意",
+            },
+            "type": "primary",
+            "behaviors": [
+                {"type": "callback", "value": {"action": "approve", "thread_id": thread_id}}
             ],
+            "margin": "0px 0px 0px 0px",
+        },
+        {
+            "tag": "button",
+            "element_id": "reject_btn",
+            "text": {
+                "tag": "plain_text",
+                "content": "❌ 拒绝",
+            },
+            "type": "danger",
+            "behaviors": [
+                {"type": "callback", "value": {"action": "reject", "thread_id": thread_id}}
+            ],
+            "margin": "8px 0px 0px 0px",
         },
     ]
     return card
 
 
-def create_clarification_card(questions: list[str]) -> dict:
+def create_clarification_card(questions: list[str], thread_id: str | None = None) -> dict:
     """Return an interactive clarification card.
 
     Args:
@@ -132,23 +181,44 @@ def create_clarification_card(questions: list[str]) -> dict:
     questions_text = "\n".join(f"{i + 1}. {q}" for i, q in enumerate(questions))
     content = f"**为了更准确地帮助您，请补充以下信息：**\n\n{questions_text}"
 
-    actions = []
+    form_elements = []
     for i, q in enumerate(questions):
-        actions.append(
+        form_elements.append(
             {
-                "tag": "button",
-                "text": {
+                "tag": "input",
+                "element_id": f"answer_{i}",
+                "name": f"answer_{i}",
+                "required": False,
+                "input_type": "multiline_text",
+                "rows": 2,
+                "auto_resize": True,
+                "placeholder": {
                     "tag": "plain_text",
-                    "content": f"回答: {q[:20]}..." if len(q) > 20 else f"回答: {q}",
+                    "content": "请输入回答",
                 },
-                "type": "default",
-                "value": {
-                    "action": "clarify",
-                    "question_index": i,
-                    "question": q,
+                "label": {
+                    "tag": "plain_text",
+                    "content": f"问题 {i + 1}",
                 },
+                "margin": "8px 0px 0px 0px",
             }
         )
+    form_elements.append(
+        {
+            "tag": "button",
+            "name": "submit_clarification",
+            "text": {
+                "tag": "plain_text",
+                "content": "提交回答",
+            },
+            "type": "primary",
+            "form_action_type": "submit",
+            "behaviors": [
+                {"type": "callback", "value": {"action": "clarify", "thread_id": thread_id}}
+            ],
+            "margin": "8px 0px 0px 0px",
+        }
+    )
 
     card = _base_card()
     card["header"] = {
@@ -157,16 +227,23 @@ def create_clarification_card(questions: list[str]) -> dict:
             "content": "需要补充信息",
         },
         "template": "wathet",
+        "padding": "12px 12px 12px 12px",
     }
-    card["elements"] = [
+    card["body"]["elements"] = [
         {
             "tag": "markdown",
             "element_id": "clarification_md",
             "content": content,
+            "text_align": "left",
+            "text_size": "normal_v2",
+            "margin": "0px 0px 0px 0px",
         },
         {
-            "tag": "action",
-            "actions": actions,
+            "tag": "form",
+            "element_id": "clarification_form",
+            "name": "clarification_form",
+            "elements": form_elements,
+            "margin": "8px 0px 0px 0px",
         },
     ]
     return card
@@ -188,16 +265,21 @@ def create_result_card(
     Returns:
         A Feishu CardKit V2 dict with summary markdown and document links.
     """
-    artifacts_text = "\n".join(
-        f"- **{k}**: {v}" for k, v in artifacts.items()
-    )
-    content = f"**处理结果:**\n\n{summary}\n\n**产物:**\n{artifacts_text}"
+    content = f"**处理结果:**\n\n{summary}"
+    if artifacts:
+        artifacts_text = "\n".join(
+            f"- **{k}**: {v}" for k, v in artifacts.items()
+        )
+        content = f"{content}\n\n**产物:**\n{artifacts_text}"
 
     elements: list[dict] = [
         {
             "tag": "markdown",
             "element_id": "result_md",
             "content": content,
+            "text_align": "left",
+            "text_size": "normal_v2",
+            "margin": "0px 0px 0px 0px",
         }
     ]
 
@@ -210,6 +292,9 @@ def create_result_card(
                 "tag": "markdown",
                 "element_id": "doc_links_md",
                 "content": f"**相关文档:**\n\n{links_md}",
+                "text_align": "left",
+                "text_size": "normal_v2",
+                "margin": "0px 0px 0px 0px",
             }
         )
 
@@ -220,50 +305,7 @@ def create_result_card(
             "content": "处理完成",
         },
         "template": "green",
+        "padding": "12px 12px 12px 12px",
     }
-    card["elements"] = elements
+    card["body"]["elements"] = elements
     return card
-
-
-def update_progress_payload(
-    card_id: str,
-    step: str,
-    detail: str,
-    sequence: int,
-) -> dict:
-    """Return the payload for ``update_card_stream`` to update the progress card.
-
-    Args:
-        card_id: The ID of the card to update.
-        step: The current step name.
-        detail: Detailed description of the current step.
-        sequence: Monotonically increasing sequence number for streaming.
-
-    Returns:
-        A dict suitable for passing to the Feishu card stream update API.
-    """
-    return {
-        "card_id": card_id,
-        "sequence": sequence,
-        "card": {
-            "config": {
-                "streaming_mode": True,
-                "update_multi": True,
-            },
-            "elements": [
-                {
-                    "tag": "markdown",
-                    "element_id": "progress_md",
-                    "content": f"**{step}**",
-                },
-                {
-                    "tag": "div",
-                    "element_id": "status_div",
-                    "text": {
-                        "tag": "plain_text",
-                        "content": detail,
-                    },
-                },
-            ],
-        },
-    }
