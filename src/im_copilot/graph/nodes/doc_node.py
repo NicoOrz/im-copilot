@@ -32,7 +32,7 @@ def doc_node(state: PipelineState) -> dict:
     uat = state.get("user_access_token", "")
     title = f"文档：{topic}"
 
-    markdown = _get_llm().invoke(DOC_PROMPT.format(topic=topic, raw_message=raw_message)).content
+    markdown = _get_llm().invoke(DOC_PROMPT.format(topic=topic, raw_message=raw_message)).content.strip()
 
     result = {
         "kind": "doc",
