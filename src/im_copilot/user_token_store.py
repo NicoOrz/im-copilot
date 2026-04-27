@@ -73,8 +73,8 @@ class UserTokenStore:
         if not refresh_token:
             logger.warning("No refresh_token for open_id=%s, re-auth required", open_id)
             return None
-        app_id = os.environ.get("FEISHU_APP_ID", "")
-        app_secret = os.environ.get("FEISHU_APP_SECRET", "")
+        app_id = os.environ.get("FEISHU_APP_ID") or os.environ.get("LARK_APP_ID", "")
+        app_secret = os.environ.get("FEISHU_APP_SECRET") or os.environ.get("LARK_APP_SECRET", "")
         try:
             resp = httpx.post(
                 "https://open.feishu.cn/open-apis/authen/v2/oauth/token",

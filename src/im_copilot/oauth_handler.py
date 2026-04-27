@@ -39,8 +39,8 @@ async def oauth_callback(request: Request) -> HTMLResponse:
     if not code or not open_id:
         return HTMLResponse(_FAIL_HTML.format(reason="缺少 code 或 state 参数"), status_code=400)
 
-    app_id = os.environ.get("FEISHU_APP_ID", "")
-    app_secret = os.environ.get("FEISHU_APP_SECRET", "")
+    app_id = os.environ.get("FEISHU_APP_ID") or os.environ.get("LARK_APP_ID", "")
+    app_secret = os.environ.get("FEISHU_APP_SECRET") or os.environ.get("LARK_APP_SECRET", "")
     redirect_uri = os.environ.get("OAUTH_CALLBACK_URL", "")
 
     try:

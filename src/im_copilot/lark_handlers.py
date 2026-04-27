@@ -296,7 +296,7 @@ def _send_oauth_prompt(lark_bot: LarkBot, chat_id: str, open_id: str) -> None:
     import urllib.parse
     auth_url = (
         "https://accounts.feishu.cn/open-apis/authen/v1/authorize"
-        f"?client_id={urllib.parse.quote(app_id)}"
+        f"?app_id={urllib.parse.quote(app_id)}"
         f"&redirect_uri={urllib.parse.quote(callback_url)}"
         f"&response_type=code"
         f"&scope={urllib.parse.quote(scopes)}"
