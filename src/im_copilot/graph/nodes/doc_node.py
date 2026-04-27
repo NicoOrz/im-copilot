@@ -48,7 +48,8 @@ def doc_node(state: PipelineState) -> dict:
             "docs", "+create",
             "--api-version", "v2",
             "--title", title,
-            "--markdown", markdown,
+            "--content", markdown,
+            "--doc-format", "markdown",
             "--as", "user",
         ], uat=uat)
         doc_token = resp.get("data", {}).get("document", {}).get("document_id", "")
