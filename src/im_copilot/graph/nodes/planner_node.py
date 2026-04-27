@@ -23,13 +23,16 @@ PLANNER_PROMPT = """根据用户的意图类型和主题，制定一个执行计
 2. 最后一步必须是 deliver
 3. create_multi 时，根据用户需求选择需要的步骤（doc/whiteboard/slide），然后 deliver
 4. chat 时，直接 deliver
+5. 用户消息中已包含足够内容（如原文、数据、会议纪要等）时，直接输出计划，不要再问用户要材料
 
 用户意图类型：{intent_type}
 用户主题：{topic}
+用户原始消息：
+{raw_message}
 历史澄清问答：
 {clarification_history}
 
-请判断是否需要向用户澄清问题。如果意图明确，直接输出计划；如果意图模糊或缺少关键信息，输出需要澄清的问题。
+请判断是否需要向用户澄清问题。如果意图明确或原始消息中已有足够内容，直接输出计划；只有在意图真正模糊且无法推断时，才输出需要澄清的问题。
 
 请输出：
 - needs_clarification: true/false
@@ -75,6 +78,7 @@ def planner_node(state: PipelineState) -> dict:
     prompt = PLANNER_PROMPT.format(
         intent_type=intent_type,
         topic=topic,
+        raw_message=state.get("raw_message", ""),
         clarification_history=history_text,
     )
     result: PlannerOutput = _get_llm().invoke(prompt)
