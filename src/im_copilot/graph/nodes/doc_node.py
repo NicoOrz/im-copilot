@@ -1,5 +1,6 @@
 import logging
 
+from im_copilot.lark_cli import run_lark_cli
 from im_copilot.llm import get_llm
 from im_copilot.state import PipelineState
 
@@ -25,19 +26,13 @@ def _get_llm():
     return _get_llm._instance
 
 
-def _get_lark_client(uat: str):
-    from im_copilot.lark_doc import LarkDocClient
-    return LarkDocClient(user_access_token=uat or None)
-
-
 def doc_node(state: PipelineState) -> dict:
     topic = state.get("intent_params", {}).get("topic", "未命名文档")
     raw_message = state.get("raw_message", "")
     uat = state.get("user_access_token", "")
     title = f"文档：{topic}"
 
-    prompt = DOC_PROMPT.format(topic=topic, raw_message=raw_message)
-    markdown = _get_llm().invoke(prompt).content
+    markdown = _get_llm().invoke(DOC_PROMPT.format(topic=topic, raw_message=raw_message)).content
 
     result = {
         "kind": "doc",
@@ -49,17 +44,21 @@ def doc_node(state: PipelineState) -> dict:
     }
 
     try:
-        client = _get_lark_client(uat)
-        doc_token = client.create_doc(title, content=markdown)
+        resp = run_lark_cli([
+            "docs", "+create",
+            "--api-version", "v2",
+            "--title", title,
+            "--markdown", markdown,
+            "--as", "user",
+        ], uat=uat)
+        doc_token = resp.get("data", {}).get("document", {}).get("document_id", "")
         if doc_token:
-            url = client.get_share_link(doc_token, "doc")
+            url = f"https://www.feishu.cn/docx/{doc_token}"
             result.update({"status": "created", "token": doc_token, "url": url})
+            logger.info("Created doc %s", doc_token)
+        else:
+            logger.error("doc +create returned no token: %s", resp)
     except Exception:
         logger.exception("doc API failed, falling back to draft")
 
-    return {
-        "artifacts": {
-            **state.get("artifacts", {}),
-            "doc": result,
-        }
-    }
+    return {"artifacts": {**state.get("artifacts", {}), "doc": result}}
