@@ -2,6 +2,12 @@ from operator import add
 from typing import Annotated, Literal, TypedDict
 
 
+def resettable_add(left: list, right: list) -> list:
+    if right == []:
+        return []
+    return left + right
+
+
 IntentType = Literal[
     "create_doc",
     "create_whiteboard",
@@ -49,7 +55,7 @@ class PipelineState(TypedDict, total=False):
 
     plan: list[PlanStep]
     artifacts: dict[str, ContentResult]
-    checks: Annotated[list[CheckResult], add]
+    checks: Annotated[list[CheckResult], resettable_add]
     summary: str
 
     errors: Annotated[list[str], add]
@@ -58,7 +64,7 @@ class PipelineState(TypedDict, total=False):
     clarification_history: Annotated[list[ClarificationTurn], add]
     approvals: Annotated[list[ApprovalGate], add]
     reflection_iteration: int
-    side_agent_results: Annotated[list[dict], add]
+    side_agent_results: Annotated[list[dict], resettable_add]
     thread_id: str
     user_id: str
     pending_questions: list[str]

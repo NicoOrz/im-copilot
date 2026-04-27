@@ -15,17 +15,21 @@ def plan_approval_node(state: PipelineState) -> dict:
     intent_type = state.get("intent_type", "")
     intent_params = state.get("intent_params", {})
 
-    try:
-        decision = interrupt({
-            "gate": "plan_approval",
-            "plan": plan,
-            "intent_type": intent_type,
-            "intent_params": intent_params,
-            "message": "请审阅以下执行计划，确认或提出修改意见：",
-        })
-    except RuntimeError:
-        # No checkpointer configured (e.g., tests) — auto-approve
-        decision = {"approved": True, "feedback": "auto-approved"}
+    # Auto-approve in CLI mode to avoid blocking the terminal
+    if state.get("source") == "cli":
+        decision = {"approved": True, "feedback": "auto-approved (cli)"}
+    else:
+        try:
+            decision = interrupt({
+                "gate": "plan_approval",
+                "plan": plan,
+                "intent_type": intent_type,
+                "intent_params": intent_params,
+                "message": "请审阅以下执行计划，确认或提出修改意见：",
+            })
+        except RuntimeError:
+            # No checkpointer configured (e.g., tests) — auto-approve
+            decision = {"approved": True, "feedback": "auto-approved"}
 
     # decision: {"approved": bool, "feedback": str}
     approved = decision.get("approved", False) if isinstance(decision, dict) else False
@@ -50,4 +54,10 @@ def plan_approval_node(state: PipelineState) -> dict:
             feedback=feedback,
             timestamp=now,
         )],
+        "artifacts": {},
+        "checks": [],
+        "summary": "",
+        "reflection_iteration": 0,
+        "side_agent_results": [],
+        "pending_questions": [],
     }
