@@ -50,9 +50,8 @@ def doc_node(state: PipelineState) -> dict:
 
     try:
         client = _get_lark_client(uat)
-        doc_token = client.create_doc(title)
+        doc_token = client.create_doc(title, content=markdown)
         if doc_token:
-            client.write_doc(doc_token, markdown)
             url = client.get_share_link(doc_token, "doc")
             result.update({"status": "created", "token": doc_token, "url": url})
     except Exception:

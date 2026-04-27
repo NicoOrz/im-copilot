@@ -101,22 +101,14 @@ class LarkDocClient:
     # Public API
     # --------------------------------------------------------------------- #
 
-    def create_doc(self, title: str, folder_token: str | None = None) -> str:
-        """Create a new Feishu document and return its document token.
-
-        Args:
-            title: Document title.
-            folder_token: Optional parent folder token.
-
-        Returns:
-            The document token (``document_id``) or an empty string on failure.
-        """
+    def create_doc(self, title: str, folder_token: str | None = None, content: str | None = None) -> str:
+        """Create a new Feishu document and return its document token."""
         args = [
             "docs",
             "+create",
             "--api-version", "v2",
             "--title", title,
-            "--content", " ",  # v2 requires non-empty content
+            "--content", content if content else " ",
         ]
         if folder_token:
             args.extend(["--parent-token", folder_token])
