@@ -19,11 +19,13 @@ IntentType = Literal[
 PlanStep = Literal["doc", "whiteboard", "slide", "deliver"]
 
 
-class ContentResult(TypedDict):
+class ContentResult(TypedDict, total=False):
     kind: str
     title: str
     status: str
     preview: str
+    token: str
+    url: str
 
 
 class CheckResult(TypedDict):
@@ -67,4 +69,5 @@ class PipelineState(TypedDict, total=False):
     side_agent_results: Annotated[list[dict], resettable_add]
     thread_id: str
     user_id: str
+    user_access_token: str
     pending_questions: list[str]

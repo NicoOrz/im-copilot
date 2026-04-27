@@ -44,6 +44,7 @@ from im_copilot.lark_card import (
     create_streaming_card,
 )
 from im_copilot.session_manager import session_manager
+from im_copilot.user_token_store import token_store
 
 logger = logging.getLogger(__name__)
 
@@ -278,6 +279,34 @@ def _finalize_card(
         lark_bot.send_card(chat_id, card)
 
 
+def _send_oauth_prompt(lark_bot: LarkBot, chat_id: str, open_id: str) -> None:
+    """Send an OAuth authorization link to the user."""
+    app_id = os.environ.get("FEISHU_APP_ID") or os.environ.get("LARK_APP_ID", "")
+    callback_url = os.environ.get("OAUTH_CALLBACK_URL", "")
+    scopes = " ".join([
+        "offline_access",
+        "docs:document:create",
+        "docs:document:write_only",
+        "docs:document:read",
+        "slides:presentation:create",
+        "slides:presentation:write_only",
+        "docs:document.media:upload",
+    ])
+    import urllib.parse
+    auth_url = (
+        "https://accounts.feishu.cn/open-apis/authen/v1/authorize"
+        f"?client_id={urllib.parse.quote(app_id)}"
+        f"&redirect_uri={urllib.parse.quote(callback_url)}"
+        f"&response_type=code"
+        f"&scope={urllib.parse.quote(scopes)}"
+        f"&state={urllib.parse.quote(open_id)}"
+    )
+    lark_bot.send_text(
+        chat_id,
+        f"首次使用需要授权，请点击以下链接完成授权后重新发送消息：\n{auth_url}",
+    )
+
+
 def _make_card_response(toast: str | None = None) -> P2CardActionTriggerResponse:
     """Build a card action response with an optional toast message."""
     resp = P2CardActionTriggerResponse()
@@ -289,10 +318,18 @@ def _make_card_response(toast: str | None = None) -> P2CardActionTriggerResponse
     return resp
 
 
-def _process_message(text: str, chat_id: str, message_id: str, lark_bot: LarkBot) -> None:
+def _process_message(text: str, chat_id: str, message_id: str, lark_bot: LarkBot, open_id: str = "") -> None:
     thread_id = _make_thread_id(chat_id, message_id)
     source = "feishu"
     logger.debug("Process message start: thread_id=%s message_id=%s text_len=%s", thread_id, message_id, len(text))
+
+    # Check user token; prompt OAuth if missing
+    user_access_token = ""
+    if open_id:
+        user_access_token = token_store.get(open_id) or ""
+        if not user_access_token:
+            _send_oauth_prompt(lark_bot, chat_id, open_id)
+            return
 
     try:
         with get_checkpointer("sqlite") as checkpointer:
@@ -305,6 +342,8 @@ def _process_message(text: str, chat_id: str, message_id: str, lark_bot: LarkBot
                 "chat_id": chat_id,
                 "message_id": message_id,
                 "source": source,
+                "user_id": open_id,
+                "user_access_token": user_access_token,
                 "errors": [],
                 "checks": [],
                 "reflection_iteration": 0,
@@ -446,7 +485,10 @@ def on_message_receive(data: P2ImMessageReceiveV1, lark_bot: LarkBot) -> None:
 
     chat_id = message.chat_id or ""
     message_id = message.message_id or ""
-    logger.debug("Message parsed: chat_id=%s message_id=%s text_len=%s", chat_id, message_id, len(text))
+    open_id = ""
+    if data.event.sender and data.event.sender.sender_id:
+        open_id = data.event.sender.sender_id.open_id or ""
+    logger.debug("Message parsed: chat_id=%s message_id=%s open_id=%s text_len=%s", chat_id, message_id, open_id, len(text))
 
     if not _mark_message_processing(message_id):
         logger.info("Duplicate message ignored: message_id=%s", message_id)
@@ -458,7 +500,7 @@ def on_message_receive(data: P2ImMessageReceiveV1, lark_bot: LarkBot) -> None:
 
     worker = threading.Thread(
         target=_process_message,
-        args=(text, chat_id, message_id, lark_bot),
+        args=(text, chat_id, message_id, lark_bot, open_id),
         daemon=True,
     )
     worker.start()

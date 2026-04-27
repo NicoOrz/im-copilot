@@ -19,24 +19,25 @@ logger = logging.getLogger(__name__)
 class LarkDocClient:
     """Client for Feishu document operations via ``lark-cli``.
 
-    The constructor takes no arguments; configuration is read from the
-    environment or ``lark-cli`` defaults (e.g. active auth profile).
+    Pass ``user_access_token`` to call lark-cli as the user rather than the
+    default bot identity.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, user_access_token: str | None = None) -> None:
         self._cli_path = os.environ.get("LARK_CLI_PATH", "/usr/local/bin/lark-cli")
+        self._uat = user_access_token or ""
 
     # --------------------------------------------------------------------- #
     # Internal helper
     # --------------------------------------------------------------------- #
 
     def _run_lark_cli(self, args: list[str]) -> dict[str, Any]:
-        """Run ``lark-cli`` with *args* and return the parsed JSON response.
-
-        Returns an empty dict on failure so callers can fall back gracefully.
-        """
+        """Run ``lark-cli`` with *args* and return the parsed JSON response."""
         cmd = [self._cli_path] + args
         logger.debug("Running lark-cli: %s", " ".join(cmd))
+        env = os.environ.copy()
+        if self._uat:
+            env["LARKSUITE_CLI_USER_ACCESS_TOKEN"] = self._uat
         try:
             result = subprocess.run(
                 cmd,
@@ -44,6 +45,7 @@ class LarkDocClient:
                 text=True,
                 check=False,
                 timeout=60,
+                env=env,
             )
         except subprocess.TimeoutExpired:
             logger.error("lark-cli timed out: %s", " ".join(cmd))
@@ -318,3 +320,73 @@ class LarkDocClient:
         else:
             logger.error("Failed to get share link for %s: %s", token, resp)
         return url
+
+    def update_whiteboard(self, whiteboard_token: str, mermaid: str) -> bool:
+        """Write Mermaid content to an existing Feishu whiteboard via stdin."""
+        cmd = [
+            self._cli_path, "whiteboard", "+update", whiteboard_token,
+            "--source", "-", "--input_format", "mermaid",
+        ]
+        env = os.environ.copy()
+        if self._uat:
+            env["LARKSUITE_CLI_USER_ACCESS_TOKEN"] = self._uat
+        logger.info("Updating whiteboard %s (mermaid length=%d)", whiteboard_token, len(mermaid))
+        try:
+            result = subprocess.run(
+                cmd,
+                input=mermaid,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=60,
+                env=env,
+            )
+        except subprocess.TimeoutExpired:
+            logger.error("lark-cli whiteboard +update timed out")
+            return False
+        except FileNotFoundError:
+            logger.error("lark-cli not found at %s", self._cli_path)
+            return False
+
+        if result.returncode != 0:
+            logger.error("whiteboard +update failed (rc=%d): %s", result.returncode, result.stderr.strip())
+            return False
+        try:
+            data = json.loads(result.stdout.strip() or "{}")
+        except json.JSONDecodeError:
+            data = {}
+        ok = data.get("ok", True)
+        if ok:
+            logger.info("Updated whiteboard %s", whiteboard_token)
+        else:
+            logger.error("whiteboard +update API error: %s", data)
+        return bool(ok)
+
+    def create_slide_with_content(self, title: str, slides_xml: str) -> str:
+        """Create a Feishu Slides presentation with initial slide content.
+
+        Args:
+            title: Presentation title.
+            slides_xml: Comma-separated ``<slide>`` XML fragments.
+
+        Returns:
+            The presentation token or an empty string on failure.
+        """
+        args = [
+            "slides", "+create",
+            "--title", title,
+            "--slides", f"[{slides_xml}]",
+        ]
+        logger.info("Creating slide with content: title=%s", title)
+        resp = self._run_lark_cli(args)
+        presentation = resp.get("data", {}).get("presentation", {})
+        slide_id = (
+            presentation.get("presentation_token")
+            or presentation.get("obj_token")
+            or presentation.get("id", "")
+        )
+        if slide_id:
+            logger.info("Created slide with content %s", slide_id)
+        else:
+            logger.error("Failed to create slide with content: %s", resp)
+        return slide_id

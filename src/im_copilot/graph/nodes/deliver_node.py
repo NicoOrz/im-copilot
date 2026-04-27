@@ -19,7 +19,6 @@ CHAT_PROMPT = """你是一位友好的智能助手。请回复用户的聊天消
 
 
 def _get_llm():
-    """Lazy-load the LLM client to avoid import-time construction."""
     if not hasattr(_get_llm, "_instance"):
         _get_llm._instance = get_llm()
     return _get_llm._instance
@@ -41,12 +40,18 @@ def deliver_node(state: PipelineState) -> dict:
     plan = state.get("plan", [])
     artifacts = state.get("artifacts", {})
     result_lines = []
+    link_lines = []
+
     for step in plan:
         if step == "deliver":
             continue
         result = artifacts.get(step)
-        if result:
-            result_lines.append(f"【{result['title']}】\n{result['preview']}")
+        if not result:
+            continue
+        result_lines.append(f"【{result['title']}】\n{result.get('preview', '')}")
+        if result.get("url"):
+            status_tag = "（草稿，未上传）" if result.get("status") == "draft" else ""
+            link_lines.append(f"- {result['title']}{status_tag}：{result['url']}")
 
     results_text = "\n\n".join(result_lines) if result_lines else "无执行结果"
     prompt = DELIVER_PROMPT.format(
@@ -55,4 +60,8 @@ def deliver_node(state: PipelineState) -> dict:
         results=results_text,
     )
     summary = _get_llm().invoke(prompt).content
+
+    if link_lines:
+        summary += "\n\n已创建的飞书资源：\n" + "\n".join(link_lines)
+
     return {"summary": summary}

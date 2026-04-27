@@ -91,8 +91,15 @@ def _configure_logging(debug: bool) -> None:
 
 def _run_web_server(host: str, port: int) -> int:
     import uvicorn
-    from im_copilot.web.app import app
+    from fastapi import FastAPI
+    from im_copilot.oauth_handler import router as oauth_router
 
+    try:
+        from im_copilot.web.app import app
+    except ImportError:
+        app = FastAPI()
+
+    app.include_router(oauth_router)
     print(f"Starting IM Copilot web server at http://{host}:{port}")
     uvicorn.run(app, host=host, port=port, log_level="info")
     return 0
