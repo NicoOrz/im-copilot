@@ -287,6 +287,7 @@ def _send_oauth_prompt(lark_bot: LarkBot, chat_id: str, open_id: str) -> None:
         "offline_access",
         "docx:document",
         "drive:drive",
+        "slides:presentation:readonly",
         "slides:presentation",
         "wiki:wiki",
     ])
