@@ -285,12 +285,10 @@ def _send_oauth_prompt(lark_bot: LarkBot, chat_id: str, open_id: str) -> None:
     callback_url = os.environ.get("OAUTH_CALLBACK_URL", "")
     scopes = " ".join([
         "offline_access",
-        "docs:document:create",
-        "docs:document:write_only",
-        "docs:document:read",
-        "slides:presentation:create",
-        "slides:presentation:write_only",
-        "docs:document.media:upload",
+        "docx:document",
+        "drive:drive",
+        "slides:presentation",
+        "wiki:wiki",
     ])
     import urllib.parse
     auth_url = (
