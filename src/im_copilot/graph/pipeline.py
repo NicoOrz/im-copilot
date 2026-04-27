@@ -18,6 +18,8 @@ def route_after_planner(state: PipelineState) -> str:
     pending = state.get("pending_questions", [])
     if pending:
         return "clarification"
+    if state.get("intent_type") == "chat":
+        return "route_content"
     return "plan_approval"
 
 
@@ -51,6 +53,7 @@ def route_content_node(state: PipelineState) -> dict:
 def fan_out_verify(state: PipelineState) -> list:
     """Fan out to verify and side_agent in parallel."""
     from langgraph.types import Send
+
     return [Send("verify", state), Send("side_agent", state)]
 
 
@@ -115,7 +118,7 @@ def build_pipeline(checkpointer=None):
     builder.add_conditional_edges(
         "planner",
         route_after_planner,
-        ["clarification", "plan_approval"],
+        ["clarification", "plan_approval", "route_content"],
     )
     builder.add_edge("clarification", "planner")
     builder.add_conditional_edges(
