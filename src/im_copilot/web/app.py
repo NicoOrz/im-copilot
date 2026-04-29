@@ -1,6 +1,8 @@
+import asyncio
 import json
 import os
 import sqlite3
+import threading
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -11,6 +13,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from langgraph.types import Command
 
+import lark_oapi as lark
+
 from im_copilot.checkpointer import get_checkpointer
 from im_copilot.graph.pipeline import build_pipeline
 from im_copilot.state import PipelineState
@@ -18,6 +22,7 @@ from im_copilot.state import PipelineState
 # In-memory cache for pending interrupts per thread_id
 # Maps thread_id -> interrupt payload
 _interrupt_cache: dict[str, dict] = {}
+_interrupt_cache_lock = asyncio.Lock()
 
 # Checkpointer DB path (same as checkpointer.py default)
 DB_PATH = os.getenv("CHECKPOINTER_DB", ".copilot_checkpoints.sqlite")
@@ -233,9 +238,43 @@ def _delete_session(thread_id: str) -> bool:
         conn.close()
 
 
+def _start_lark_bot_thread() -> threading.Thread | None:
+    """Start the Lark WebSocket client in a background daemon thread."""
+    from im_copilot.lark_bot import LarkBot
+    from im_copilot.lark_handlers import build_event_handler
+
+    app_id = os.getenv("LARK_APP_ID")
+    app_secret = os.getenv("LARK_APP_SECRET")
+    if not app_id or not app_secret:
+        print("Warning: LARK_BOT_ENABLED set but LARK_APP_ID or LARK_APP_SECRET missing")
+        return None
+
+    def _run() -> None:
+        bot = LarkBot(
+            app_id=app_id,
+            app_secret=app_secret,
+            encrypt_key=os.getenv("LARK_ENCRYPT_KEY"),
+            verification_token=os.getenv("LARK_VERIFICATION_TOKEN"),
+            domain=os.getenv("LARK_DOMAIN", lark.FEISHU_DOMAIN),
+            debug=os.getenv("LARK_BOT_DEBUG") == "1",
+        )
+        handler = build_event_handler(bot)
+        bot.start_ws(handler)
+
+    t = threading.Thread(target=_run, daemon=True, name="lark-ws")
+    t.start()
+    return t
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup/shutdown."""
+    ws_thread = None
+    if os.getenv("LARK_BOT_ENABLED"):
+        ws_thread = _start_lark_bot_thread()
+        if ws_thread:
+            print("Lark WebSocket client started in background thread")
+
     # Startup: ensure DB exists
     if not os.path.exists(DB_PATH):
         conn = _get_db_connection()
@@ -308,20 +347,33 @@ async def api_get_session_history(thread_id: str):
 @app.delete("/api/sessions/{thread_id}")
 async def api_delete_session(thread_id: str):
     deleted = _delete_session(thread_id)
-    if thread_id in _interrupt_cache:
-        del _interrupt_cache[thread_id]
+    async with _interrupt_cache_lock:
+        _interrupt_cache.pop(thread_id, None)
     return {"deleted": deleted}
 
 
 @app.post("/api/sessions/{thread_id}/chat")
 async def api_chat(thread_id: str, message: str = Form(...)):
-    """Send a message to the graph.
+    from im_copilot.commands import parse_command, execute_command
 
-    Returns:
-        - status: "complete" | "interrupted"
-        - For complete: summary, artifacts
-        - For interrupted: gate, questions/plan, etc.
-    """
+    parsed = parse_command(message.strip())
+    if parsed is not None:
+        cmd_name, cmd_args = parsed
+        cmd_result = execute_command(cmd_name, cmd_args, thread_id, thread_id, source="web")
+        if cmd_result.metadata.get("action") == "reset_thread":
+            new_thread_id = str(uuid.uuid4())
+            return JSONResponse({
+                "status": "command",
+                "command": "new",
+                "message": cmd_result.response_text,
+                "new_thread_id": new_thread_id,
+            })
+        return JSONResponse({
+            "status": "command",
+            "command": cmd_result.command,
+            "message": cmd_result.response_text,
+        })
+
     cp_type = os.getenv("CHECKPOINTER_TYPE", "sqlite")
 
     with get_checkpointer(cp_type) as checkpointer:
@@ -333,6 +385,7 @@ async def api_chat(thread_id: str, message: str = Form(...)):
             "chat_id": thread_id,
             "message_id": str(uuid.uuid4()),
             "source": "web",
+            "message_history": [{"role": "user", "content": message}],
             "errors": [],
             "checks": [],
             "reflection_iteration": 0,
@@ -359,15 +412,16 @@ async def api_chat(thread_id: str, message: str = Form(...)):
         if "intent_params" in interrupt_data.value:
             payload["intent_params"] = interrupt_data.value["intent_params"]
 
-        _interrupt_cache[thread_id] = payload
+        async with _interrupt_cache_lock:
+            _interrupt_cache[thread_id] = payload
         return JSONResponse({
             "status": "interrupted",
             **payload,
         })
 
     # Complete
-    if thread_id in _interrupt_cache:
-        del _interrupt_cache[thread_id]
+    async with _interrupt_cache_lock:
+        _interrupt_cache.pop(thread_id, None)
 
     return JSONResponse({
         "status": "complete",
@@ -380,16 +434,11 @@ async def api_chat(thread_id: str, message: str = Form(...)):
 
 @app.post("/api/sessions/{thread_id}/resume")
 async def api_resume(thread_id: str, decision: str = Form(...)):
-    """Resume from an interrupt.
+    async with _interrupt_cache_lock:
+        if thread_id not in _interrupt_cache:
+            raise HTTPException(status_code=400, detail="No pending interrupt for this session")
+        gate = _interrupt_cache[thread_id]["gate"]
 
-    decision: JSON string with the user's response.
-        - plan_approval: {"approved": true/false, "feedback": "..."}
-        - clarification: ["answer1", "answer2", ...] or single string
-    """
-    if thread_id not in _interrupt_cache:
-        raise HTTPException(status_code=400, detail="No pending interrupt for this session")
-
-    gate = _interrupt_cache[thread_id]["gate"]
     parsed_decision = json.loads(decision)
 
     cp_type = os.getenv("CHECKPOINTER_TYPE", "sqlite")
@@ -419,14 +468,16 @@ async def api_resume(thread_id: str, decision: str = Form(...)):
         if "intent_params" in interrupt_data.value:
             payload["intent_params"] = interrupt_data.value["intent_params"]
 
-        _interrupt_cache[thread_id] = payload
+        async with _interrupt_cache_lock:
+            _interrupt_cache[thread_id] = payload
         return JSONResponse({
             "status": "interrupted",
             **payload,
         })
 
     # Complete
-    del _interrupt_cache[thread_id]
+    async with _interrupt_cache_lock:
+        _interrupt_cache.pop(thread_id, None)
 
     return JSONResponse({
         "status": "complete",
@@ -439,10 +490,11 @@ async def api_resume(thread_id: str, decision: str = Form(...)):
 
 @app.get("/api/sessions/{thread_id}/status")
 async def api_status(thread_id: str):
-    """Check if there's a pending interrupt for this session."""
-    if thread_id in _interrupt_cache:
+    async with _interrupt_cache_lock:
+        cached = _interrupt_cache.get(thread_id)
+    if cached is not None:
         return JSONResponse({
             "status": "interrupted",
-            **_interrupt_cache[thread_id],
+            **cached,
         })
     return JSONResponse({"status": "idle"})

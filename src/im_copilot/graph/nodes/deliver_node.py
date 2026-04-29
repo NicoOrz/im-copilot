@@ -1,3 +1,4 @@
+from im_copilot.graph.nodes.history_utils import format_history
 from im_copilot.llm import get_llm
 from im_copilot.state import PipelineState
 
@@ -13,13 +14,15 @@ DELIVER_PROMPT = """你是一位智能助手，负责向用户汇总任务执行
 
 CHAT_PROMPT = """你是一位友好的智能助手。请回复用户的聊天消息。
 
-用户消息：{message}
+历史对话：
+{history}
 
-请给出自然、有帮助的中文回复。"""
+当前用户消息：{message}
+
+请结合历史对话上下文，给出自然、有帮助的中文回复。"""
 
 
 def _get_llm():
-    """Lazy-load the LLM client to avoid import-time construction."""
     if not hasattr(_get_llm, "_instance"):
         _get_llm._instance = get_llm()
     return _get_llm._instance
@@ -34,19 +37,29 @@ def deliver_node(state: PipelineState) -> dict:
     raw_message = state.get("raw_message", "")
 
     if intent_type == "chat":
-        prompt = CHAT_PROMPT.format(message=raw_message)
+        history = format_history(state.get("message_history", [])[:-1])
+        prompt = CHAT_PROMPT.format(message=raw_message, history=history)
         summary = _get_llm().invoke(prompt).content
-        return {"summary": summary}
+        return {
+            "summary": summary,
+            "message_history": [{"role": "assistant", "content": summary}],
+        }
 
     plan = state.get("plan", [])
     artifacts = state.get("artifacts", {})
     result_lines = []
+    link_lines = []
+
     for step in plan:
         if step == "deliver":
             continue
         result = artifacts.get(step)
-        if result:
-            result_lines.append(f"【{result['title']}】\n{result['preview']}")
+        if not result:
+            continue
+        result_lines.append(f"【{result['title']}】\n{result.get('preview', '')}")
+        if result.get("url"):
+            status_tag = "（草稿，未上传）" if result.get("status") == "draft" else ""
+            link_lines.append(f"- {result['title']}{status_tag}：{result['url']}")
 
     results_text = "\n\n".join(result_lines) if result_lines else "无执行结果"
     prompt = DELIVER_PROMPT.format(
@@ -55,4 +68,11 @@ def deliver_node(state: PipelineState) -> dict:
         results=results_text,
     )
     summary = _get_llm().invoke(prompt).content
-    return {"summary": summary}
+
+    if link_lines:
+        summary += "\n\n已创建的飞书资源：\n" + "\n".join(link_lines)
+
+    return {
+        "summary": summary,
+        "message_history": [{"role": "assistant", "content": summary}],
+    }

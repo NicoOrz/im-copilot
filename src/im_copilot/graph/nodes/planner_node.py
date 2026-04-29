@@ -1,7 +1,12 @@
 from pydantic import BaseModel, Field
 
+import os
+
+from im_copilot.graph.nodes.history_utils import format_history
 from im_copilot.llm import get_llm
 from im_copilot.state import PipelineState
+
+_CLARIFICATION_THRESHOLD = float(os.getenv("CLARIFICATION_CONFIDENCE_THRESHOLD", "0.7"))
 
 PLANNER_PROMPT = """根据用户的意图类型和主题，制定一个执行计划。
 
@@ -23,13 +28,18 @@ PLANNER_PROMPT = """根据用户的意图类型和主题，制定一个执行计
 2. 最后一步必须是 deliver
 3. create_multi 时，根据用户需求选择需要的步骤（doc/whiteboard/slide），然后 deliver
 4. chat 时，直接 deliver
+5. 用户消息中已包含足够内容（如原文、数据、会议纪要等）时，直接输出计划，不要再问用户要材料
 
 用户意图类型：{intent_type}
 用户主题：{topic}
+用户原始消息：
+{raw_message}
+历史对话：
+{message_history}
 历史澄清问答：
 {clarification_history}
 
-请判断是否需要向用户澄清问题。如果意图明确，直接输出计划；如果意图模糊或缺少关键信息，输出需要澄清的问题。
+请判断是否需要向用户澄清问题。如果意图明确或原始消息中已有足够内容，直接输出计划；只有在意图真正模糊且无法推断时，才输出需要澄清的问题。
 
 请输出：
 - needs_clarification: true/false
@@ -61,6 +71,8 @@ def _get_llm():
 def planner_node(state: PipelineState) -> dict:
     intent_type = state.get("intent_type", "chat")
     topic = state.get("intent_params", {}).get("topic", "")
+    confidence = state.get("intent_confidence", 1.0)
+    allow_clarification = confidence < _CLARIFICATION_THRESHOLD
 
     # Build clarification history text
     history = state.get("clarification_history", [])
@@ -75,14 +87,32 @@ def planner_node(state: PipelineState) -> dict:
     prompt = PLANNER_PROMPT.format(
         intent_type=intent_type,
         topic=topic,
+        raw_message=state.get("raw_message", ""),
+        message_history=format_history(state.get("message_history", [])[:-1]),
         clarification_history=history_text,
     )
     result: PlannerOutput = _get_llm().invoke(prompt)
 
-    if result.needs_clarification:
+    if result.needs_clarification and allow_clarification:
         return {
             "plan": [],
             "pending_questions": result.questions,
         }
 
-    return {"plan": result.plan}
+    plan = result.plan
+    if not plan:
+        plan = _default_plan(intent_type)
+    return {"plan": plan}
+
+
+_INTENT_TO_PLAN: dict[str, list[str]] = {
+    "create_doc": ["doc", "deliver"],
+    "create_whiteboard": ["whiteboard", "deliver"],
+    "create_slide": ["slide", "deliver"],
+    "create_multi": ["doc", "whiteboard", "slide", "deliver"],
+    "chat": ["deliver"],
+}
+
+
+def _default_plan(intent_type: str) -> list[str]:
+    return list(_INTENT_TO_PLAN.get(intent_type, ["deliver"]))

@@ -2,6 +2,12 @@ from operator import add
 from typing import Annotated, Literal, TypedDict
 
 
+def resettable_add(left: list, right: list) -> list:
+    if right == []:
+        return []
+    return left + right
+
+
 IntentType = Literal[
     "create_doc",
     "create_whiteboard",
@@ -13,11 +19,13 @@ IntentType = Literal[
 PlanStep = Literal["doc", "whiteboard", "slide", "deliver"]
 
 
-class ContentResult(TypedDict):
+class ContentResult(TypedDict, total=False):
     kind: str
     title: str
     status: str
     preview: str
+    token: str
+    url: str
 
 
 class CheckResult(TypedDict):
@@ -29,6 +37,11 @@ class CheckResult(TypedDict):
 class ClarificationTurn(TypedDict):
     question: str
     answer: str
+
+
+class MessageTurn(TypedDict):
+    role: str  # "user" | "assistant"
+    content: str
 
 
 class ApprovalGate(TypedDict):
@@ -46,10 +59,11 @@ class PipelineState(TypedDict, total=False):
 
     intent_type: IntentType
     intent_params: dict[str, str]
+    intent_confidence: float
 
     plan: list[PlanStep]
     artifacts: dict[str, ContentResult]
-    checks: Annotated[list[CheckResult], add]
+    checks: Annotated[list[CheckResult], resettable_add]
     summary: str
 
     errors: Annotated[list[str], add]
@@ -58,7 +72,9 @@ class PipelineState(TypedDict, total=False):
     clarification_history: Annotated[list[ClarificationTurn], add]
     approvals: Annotated[list[ApprovalGate], add]
     reflection_iteration: int
-    side_agent_results: Annotated[list[dict], add]
+    side_agent_results: Annotated[list[dict], resettable_add]
     thread_id: str
     user_id: str
+    user_access_token: str
     pending_questions: list[str]
+    message_history: Annotated[list[MessageTurn], add]
