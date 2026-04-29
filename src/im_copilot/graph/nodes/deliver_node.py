@@ -1,3 +1,4 @@
+from im_copilot.graph.nodes.history_utils import format_history
 from im_copilot.llm import get_llm
 from im_copilot.state import PipelineState
 
@@ -13,9 +14,12 @@ DELIVER_PROMPT = """你是一位智能助手，负责向用户汇总任务执行
 
 CHAT_PROMPT = """你是一位友好的智能助手。请回复用户的聊天消息。
 
-用户消息：{message}
+历史对话：
+{history}
 
-请给出自然、有帮助的中文回复。"""
+当前用户消息：{message}
+
+请结合历史对话上下文，给出自然、有帮助的中文回复。"""
 
 
 def _get_llm():
@@ -33,9 +37,13 @@ def deliver_node(state: PipelineState) -> dict:
     raw_message = state.get("raw_message", "")
 
     if intent_type == "chat":
-        prompt = CHAT_PROMPT.format(message=raw_message)
+        history = format_history(state.get("message_history", [])[:-1])
+        prompt = CHAT_PROMPT.format(message=raw_message, history=history)
         summary = _get_llm().invoke(prompt).content
-        return {"summary": summary}
+        return {
+            "summary": summary,
+            "message_history": [{"role": "assistant", "content": summary}],
+        }
 
     plan = state.get("plan", [])
     artifacts = state.get("artifacts", {})
@@ -64,4 +72,7 @@ def deliver_node(state: PipelineState) -> dict:
     if link_lines:
         summary += "\n\n已创建的飞书资源：\n" + "\n".join(link_lines)
 
-    return {"summary": summary}
+    return {
+        "summary": summary,
+        "message_history": [{"role": "assistant", "content": summary}],
+    }

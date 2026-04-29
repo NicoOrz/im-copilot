@@ -2,6 +2,7 @@ from pydantic import BaseModel, Field
 
 import os
 
+from im_copilot.graph.nodes.history_utils import format_history
 from im_copilot.llm import get_llm
 from im_copilot.state import PipelineState
 
@@ -33,6 +34,8 @@ PLANNER_PROMPT = """根据用户的意图类型和主题，制定一个执行计
 用户主题：{topic}
 用户原始消息：
 {raw_message}
+历史对话：
+{message_history}
 历史澄清问答：
 {clarification_history}
 
@@ -85,6 +88,7 @@ def planner_node(state: PipelineState) -> dict:
         intent_type=intent_type,
         topic=topic,
         raw_message=state.get("raw_message", ""),
+        message_history=format_history(state.get("message_history", [])[:-1]),
         clarification_history=history_text,
     )
     result: PlannerOutput = _get_llm().invoke(prompt)

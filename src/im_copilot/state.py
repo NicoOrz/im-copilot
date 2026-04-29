@@ -39,6 +39,11 @@ class ClarificationTurn(TypedDict):
     answer: str
 
 
+class MessageTurn(TypedDict):
+    role: str  # "user" | "assistant"
+    content: str
+
+
 class ApprovalGate(TypedDict):
     gate_name: str
     status: Literal["pending", "approved", "rejected", "skipped"]
@@ -72,3 +77,4 @@ class PipelineState(TypedDict, total=False):
     user_id: str
     user_access_token: str
     pending_questions: list[str]
+    message_history: Annotated[list[MessageTurn], add]

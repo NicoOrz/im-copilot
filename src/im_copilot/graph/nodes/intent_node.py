@@ -1,5 +1,6 @@
 from pydantic import BaseModel, Field
 
+from im_copilot.graph.nodes.history_utils import format_history
 from im_copilot.llm import get_llm
 from im_copilot.state import PipelineState
 
@@ -12,9 +13,12 @@ INTENT_PROMPT = """分析用户的输入消息，判断其意图类型。
 - create_multi: 用户同时要求创建多种类型的内容（至少两种）
 - chat: 普通聊天，没有明确的内容创建需求
 
+历史对话：
+{history}
+
 用户消息：{message}
 
-请输出意图类型和提取的关键参数（如主题）。"""
+请结合历史对话上下文，输出意图类型和提取的关键参数（如主题）。"""
 
 
 class IntentOutput(BaseModel):
@@ -38,7 +42,8 @@ def _get_llm():
 
 def intent_node(state: PipelineState) -> dict:
     raw_message = state.get("raw_message", "")
-    prompt = INTENT_PROMPT.format(message=raw_message)
+    history = format_history(state.get("message_history", [])[:-1])
+    prompt = INTENT_PROMPT.format(message=raw_message, history=history)
     result: IntentOutput = _get_llm().invoke(prompt)
     return {
         "intent_type": result.intent_type,

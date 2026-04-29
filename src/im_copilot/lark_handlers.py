@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -120,9 +121,67 @@ def _extract_text_content(content: str) -> str:
         return content
 
 
-def _make_thread_id(chat_id: str, message_id: str) -> str:
-    request_id = message_id or f"generated:{time.time_ns()}:{uuid.uuid4().hex}"
-    return f"{chat_id}:{request_id}"
+def _make_thread_id(chat_id: str, message_id: str | None = None) -> str:
+    with _chat_generation_lock:
+        gen = _chat_generation.get(chat_id)
+    if gen is None:
+        gen = _load_generation(chat_id)
+        with _chat_generation_lock:
+            _chat_generation[chat_id] = gen
+    return f"{chat_id}:gen{gen}"
+
+
+def _reset_chat_thread(chat_id: str) -> str:
+    with _chat_generation_lock:
+        gen = _chat_generation.get(chat_id, 0) + 1
+        _chat_generation[chat_id] = gen
+    _persist_generation(chat_id, gen)
+    return f"{chat_id}:gen{gen}"
+
+
+def _generation_db_path() -> str:
+    return _processed_messages_db_path()
+
+
+def _load_generation(chat_id: str) -> int:
+    db_path = _generation_db_path()
+    conn = sqlite3.connect(db_path, timeout=1)
+    try:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS chat_thread_generation "
+            "(chat_id TEXT PRIMARY KEY, generation INTEGER NOT NULL DEFAULT 0)"
+        )
+        row = conn.execute(
+            "SELECT generation FROM chat_thread_generation WHERE chat_id = ?",
+            (chat_id,),
+        ).fetchone()
+        return row[0] if row else 0
+    finally:
+        conn.close()
+
+
+def _persist_generation(chat_id: str, gen: int) -> None:
+    db_path = _generation_db_path()
+    conn = sqlite3.connect(db_path, timeout=1)
+    try:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS chat_thread_generation "
+            "(chat_id TEXT PRIMARY KEY, generation INTEGER NOT NULL DEFAULT 0)"
+        )
+        conn.execute(
+            "INSERT INTO chat_thread_generation (chat_id, generation) VALUES (?, ?) "
+            "ON CONFLICT(chat_id) DO UPDATE SET generation = excluded.generation",
+            (chat_id, gen),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+_chat_generation: dict[str, int] = {}
+_chat_generation_lock = threading.Lock()
+
+_AT_MENTION_RE = re.compile(r"^@\S+\s*")
 
 
 def _is_interrupt_update(step: dict[str, Any]) -> bool:
@@ -320,7 +379,20 @@ def _make_card_response(toast: str | None = None) -> P2CardActionTriggerResponse
 
 
 def _process_message(text: str, chat_id: str, message_id: str, lark_bot: LarkBot, open_id: str = "") -> None:
-    thread_id = _make_thread_id(chat_id, message_id)
+    from im_copilot.commands import parse_command, execute_command
+
+    clean_text = _AT_MENTION_RE.sub("", text.strip())
+    parsed = parse_command(clean_text)
+    if parsed is not None:
+        cmd_name, cmd_args = parsed
+        thread_id = _make_thread_id(chat_id)
+        cmd_result = execute_command(cmd_name, cmd_args, chat_id, thread_id, source="feishu")
+        if cmd_result.metadata.get("action") == "reset_thread":
+            _reset_chat_thread(chat_id)
+        lark_bot.reply_text(message_id, cmd_result.response_text)
+        return
+
+    thread_id = _make_thread_id(chat_id)
     source = "feishu"
     logger.debug("Process message start: thread_id=%s message_id=%s text_len=%s", thread_id, message_id, len(text))
 
@@ -345,6 +417,7 @@ def _process_message(text: str, chat_id: str, message_id: str, lark_bot: LarkBot
                 "source": source,
                 "user_id": open_id,
                 "user_access_token": user_access_token,
+                "message_history": [{"role": "user", "content": text}],
                 "errors": [],
                 "checks": [],
                 "reflection_iteration": 0,

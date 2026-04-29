@@ -25,7 +25,7 @@ class IntentNodeTests(unittest.TestCase):
     @patch("im_copilot.graph.nodes.intent_node._get_llm")
     def test_classifies_doc_intent(self, mock_get_llm):
         mock_llm = MockLLM()
-        mock_llm.invoke.return_value = MagicMock(intent_type="create_doc", topic="帮我写一份产品方案")
+        mock_llm.invoke.return_value = MagicMock(intent_type="create_doc", topic="帮我写一份产品方案", confidence=0.95)
         mock_get_llm.return_value = mock_llm
         result = intent_node({"raw_message": "帮我写一份产品方案"})
         self.assertEqual(result["intent_type"], "create_doc")
@@ -34,7 +34,7 @@ class IntentNodeTests(unittest.TestCase):
     @patch("im_copilot.graph.nodes.intent_node._get_llm")
     def test_classifies_multi_intent(self, mock_get_llm):
         mock_llm = MockLLM()
-        mock_llm.invoke.return_value = MagicMock(intent_type="create_multi", topic="Q2报告")
+        mock_llm.invoke.return_value = MagicMock(intent_type="create_multi", topic="Q2报告", confidence=0.9)
         mock_get_llm.return_value = mock_llm
         result = intent_node({"raw_message": "帮我写报告并生成 PPT"})
         self.assertEqual(result["intent_type"], "create_multi")
@@ -74,7 +74,7 @@ class PlannerNodeTests(unittest.TestCase):
             questions=["目标受众是谁？", "需要什么格式？"],
         )
         mock_get_llm.return_value = mock_llm
-        result = planner_node({"intent_type": "create_doc"})
+        result = planner_node({"intent_type": "create_doc", "intent_confidence": 0.3})
         self.assertEqual(result["plan"], [])
         self.assertEqual(result["pending_questions"], ["目标受众是谁？", "需要什么格式？"])
 
