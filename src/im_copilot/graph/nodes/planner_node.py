@@ -1,7 +1,11 @@
 from pydantic import BaseModel, Field
 
+import os
+
 from im_copilot.llm import get_llm
 from im_copilot.state import PipelineState
+
+_CLARIFICATION_THRESHOLD = float(os.getenv("CLARIFICATION_CONFIDENCE_THRESHOLD", "0.7"))
 
 PLANNER_PROMPT = """根据用户的意图类型和主题，制定一个执行计划。
 
@@ -64,6 +68,8 @@ def _get_llm():
 def planner_node(state: PipelineState) -> dict:
     intent_type = state.get("intent_type", "chat")
     topic = state.get("intent_params", {}).get("topic", "")
+    confidence = state.get("intent_confidence", 1.0)
+    allow_clarification = confidence < _CLARIFICATION_THRESHOLD
 
     # Build clarification history text
     history = state.get("clarification_history", [])
@@ -83,10 +89,26 @@ def planner_node(state: PipelineState) -> dict:
     )
     result: PlannerOutput = _get_llm().invoke(prompt)
 
-    if result.needs_clarification:
+    if result.needs_clarification and allow_clarification:
         return {
             "plan": [],
             "pending_questions": result.questions,
         }
 
-    return {"plan": result.plan}
+    plan = result.plan
+    if not plan:
+        plan = _default_plan(intent_type)
+    return {"plan": plan}
+
+
+_INTENT_TO_PLAN: dict[str, list[str]] = {
+    "create_doc": ["doc", "deliver"],
+    "create_whiteboard": ["whiteboard", "deliver"],
+    "create_slide": ["slide", "deliver"],
+    "create_multi": ["doc", "whiteboard", "slide", "deliver"],
+    "chat": ["deliver"],
+}
+
+
+def _default_plan(intent_type: str) -> list[str]:
+    return list(_INTENT_TO_PLAN.get(intent_type, ["deliver"]))

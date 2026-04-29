@@ -54,6 +54,7 @@ class PipelineState(TypedDict, total=False):
 
     intent_type: IntentType
     intent_params: dict[str, str]
+    intent_confidence: float
 
     plan: list[PlanStep]
     artifacts: dict[str, ContentResult]

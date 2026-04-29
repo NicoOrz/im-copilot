@@ -25,6 +25,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     _configure_logging(args.debug)
 
+    if args.web and args.lark_bot:
+        return _run_web_server(args.host, args.port, with_lark_bot=True)
+
     if args.web:
         return _run_web_server(args.host, args.port)
 
@@ -89,10 +92,17 @@ def _configure_logging(debug: bool) -> None:
     )
 
 
-def _run_web_server(host: str, port: int) -> int:
+def _run_web_server(host: str, port: int, with_lark_bot: bool = False) -> int:
     import uvicorn
     from fastapi import FastAPI
     from im_copilot.oauth_handler import router as oauth_router
+
+    if with_lark_bot:
+        os.environ["LARK_BOT_ENABLED"] = "1"
+        if os.getenv("LARK_APP_ID") and os.getenv("LARK_APP_SECRET"):
+            print("Lark bot WebSocket will be started alongside the web server")
+        else:
+            print("Warning: --lark-bot set but LARK_APP_ID or LARK_APP_SECRET missing")
 
     try:
         from im_copilot.web.app import app

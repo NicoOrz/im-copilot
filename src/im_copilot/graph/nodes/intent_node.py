@@ -22,6 +22,11 @@ class IntentOutput(BaseModel):
         description="意图类型: create_doc | create_whiteboard | create_slide | create_multi | chat"
     )
     topic: str = Field(description="用户请求的主题或核心内容")
+    confidence: float = Field(
+        description="意图识别置信度，0.0-1.0。意图明确时接近1.0，模糊时接近0.0",
+        ge=0.0,
+        le=1.0,
+    )
 
 
 def _get_llm():
@@ -38,4 +43,5 @@ def intent_node(state: PipelineState) -> dict:
     return {
         "intent_type": result.intent_type,
         "intent_params": {"topic": result.topic},
+        "intent_confidence": result.confidence,
     }

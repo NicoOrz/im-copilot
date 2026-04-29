@@ -1,6 +1,7 @@
 import json
 import os
 import sqlite3
+import threading
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -10,6 +11,8 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from langgraph.types import Command
+
+import lark_oapi as lark
 
 from im_copilot.checkpointer import get_checkpointer
 from im_copilot.graph.pipeline import build_pipeline
@@ -233,9 +236,43 @@ def _delete_session(thread_id: str) -> bool:
         conn.close()
 
 
+def _start_lark_bot_thread() -> threading.Thread | None:
+    """Start the Lark WebSocket client in a background daemon thread."""
+    from im_copilot.lark_bot import LarkBot
+    from im_copilot.lark_handlers import build_event_handler
+
+    app_id = os.getenv("LARK_APP_ID")
+    app_secret = os.getenv("LARK_APP_SECRET")
+    if not app_id or not app_secret:
+        print("Warning: LARK_BOT_ENABLED set but LARK_APP_ID or LARK_APP_SECRET missing")
+        return None
+
+    def _run() -> None:
+        bot = LarkBot(
+            app_id=app_id,
+            app_secret=app_secret,
+            encrypt_key=os.getenv("LARK_ENCRYPT_KEY"),
+            verification_token=os.getenv("LARK_VERIFICATION_TOKEN"),
+            domain=os.getenv("LARK_DOMAIN", lark.FEISHU_DOMAIN),
+            debug=os.getenv("LARK_BOT_DEBUG") == "1",
+        )
+        handler = build_event_handler(bot)
+        bot.start_ws(handler)
+
+    t = threading.Thread(target=_run, daemon=True, name="lark-ws")
+    t.start()
+    return t
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup/shutdown."""
+    ws_thread = None
+    if os.getenv("LARK_BOT_ENABLED"):
+        ws_thread = _start_lark_bot_thread()
+        if ws_thread:
+            print("Lark WebSocket client started in background thread")
+
     # Startup: ensure DB exists
     if not os.path.exists(DB_PATH):
         conn = _get_db_connection()
