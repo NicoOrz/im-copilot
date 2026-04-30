@@ -1,5 +1,5 @@
 from im_copilot.graph.nodes.history_utils import format_history
-from im_copilot.llm import get_llm
+from im_copilot.llm import get_llm_for_node
 from im_copilot.state import PipelineState
 
 DELIVER_PROMPT = """你是一位智能助手，负责向用户汇总任务执行结果。
@@ -22,12 +22,6 @@ CHAT_PROMPT = """你是一位友好的智能助手。请回复用户的聊天消
 请结合历史对话上下文，给出自然、有帮助的中文回复。"""
 
 
-def _get_llm():
-    if not hasattr(_get_llm, "_instance"):
-        _get_llm._instance = get_llm()
-    return _get_llm._instance
-
-
 def deliver_node(state: PipelineState) -> dict:
     errors = state.get("errors", [])
     if errors:
@@ -35,11 +29,12 @@ def deliver_node(state: PipelineState) -> dict:
 
     intent_type = state.get("intent_type", "chat")
     raw_message = state.get("raw_message", "")
+    llm = get_llm_for_node("deliver")
 
     if intent_type == "chat":
         history = format_history(state.get("message_history", [])[:-1])
         prompt = CHAT_PROMPT.format(message=raw_message, history=history)
-        summary = _get_llm().invoke(prompt).content
+        summary = llm.invoke(prompt).content
         return {
             "summary": summary,
             "message_history": [{"role": "assistant", "content": summary}],
@@ -67,7 +62,7 @@ def deliver_node(state: PipelineState) -> dict:
         intent_type=intent_type,
         results=results_text,
     )
-    summary = _get_llm().invoke(prompt).content
+    summary = llm.invoke(prompt).content
 
     if link_lines:
         summary += "\n\n已创建的飞书资源：\n" + "\n".join(link_lines)

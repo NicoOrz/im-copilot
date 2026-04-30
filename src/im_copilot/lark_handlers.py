@@ -45,6 +45,7 @@ from im_copilot.lark_card import (
     create_streaming_card,
 )
 from im_copilot.session_manager import session_manager
+from im_copilot.user_session_store import session_store as user_session_store
 from im_copilot.user_token_store import token_store
 
 logger = logging.getLogger(__name__)
@@ -378,6 +379,15 @@ def _make_card_response(toast: str | None = None) -> P2CardActionTriggerResponse
     return resp
 
 
+def _ws_broadcast(open_id: str, data: dict) -> None:
+    try:
+        from im_copilot.web.ws import ws_manager
+
+        ws_manager.broadcast_to_user_threadsafe(open_id, data)
+    except Exception:
+        logger.debug("WS broadcast skipped (no event loop or ws_manager unavailable)")
+
+
 def _process_message(text: str, chat_id: str, message_id: str, lark_bot: LarkBot, open_id: str = "") -> None:
     from im_copilot.commands import parse_command, execute_command
 
@@ -395,6 +405,10 @@ def _process_message(text: str, chat_id: str, message_id: str, lark_bot: LarkBot
     thread_id = _make_thread_id(chat_id)
     source = "feishu"
     logger.debug("Process message start: thread_id=%s message_id=%s text_len=%s", thread_id, message_id, len(text))
+
+    if open_id:
+        user_session_store.record_session(open_id, thread_id, "feishu", chat_id=chat_id)
+        _ws_broadcast(open_id, {"type": "message", "thread_id": thread_id, "data": {"role": "user", "content": text}})
 
     # Check user token; prompt OAuth if missing
     user_access_token = ""
@@ -458,6 +472,7 @@ def _process_message(text: str, chat_id: str, message_id: str, lark_bot: LarkBot
                                     graph=graph,
                                     config=config,
                                     chat_id=chat_id,
+                                    open_id=open_id,
                                 )
                                 session_manager.update_session(
                                     thread_id,
@@ -473,6 +488,8 @@ def _process_message(text: str, chat_id: str, message_id: str, lark_bot: LarkBot
                     logger.debug("Chat deliver result: thread_id=%s summary_len=%s", thread_id, len(summary))
                     if summary:
                         lark_bot.reply_text(message_id, summary)
+                    if open_id:
+                        _ws_broadcast(open_id, {"type": "complete", "thread_id": thread_id, "data": {"summary": summary}})
                     logger.debug("Process message done: thread_id=%s message_id=%s mode=chat", thread_id, message_id)
                     return
 
@@ -489,6 +506,7 @@ def _process_message(text: str, chat_id: str, message_id: str, lark_bot: LarkBot
                     config=config,
                     card_id=msg_id,
                     chat_id=chat_id,
+                    open_id=open_id,
                 )
                 session_manager.update_session(
                     thread_id,
@@ -506,6 +524,7 @@ def _process_message(text: str, chat_id: str, message_id: str, lark_bot: LarkBot
                         graph=graph,
                         config=config,
                         chat_id=chat_id,
+                        open_id=open_id,
                     )
                     session_manager.update_session(
                         thread_id,
@@ -537,6 +556,11 @@ def _process_message(text: str, chat_id: str, message_id: str, lark_bot: LarkBot
 
             logger.debug("Resume stream finished: thread_id=%s final_keys=%s", thread_id, list(final_state.keys()))
             _finalize_card(lark_bot, session, final_state)
+            if open_id:
+                _ws_broadcast(open_id, {
+                    "type": "complete", "thread_id": thread_id,
+                    "data": {"summary": final_state.get("summary", ""), "artifacts": final_state.get("artifacts", {})},
+                })
             session_manager.delete_session(thread_id)
             logger.debug("Resume worker done: thread_id=%s", thread_id)
 
@@ -626,6 +650,16 @@ def _resume_card_action(
 
             logger.debug("Resume stream finished: thread_id=%s final_keys=%s", thread_id, list(final_state.keys()))
             _finalize_card(lark_bot, session, final_state)
+            open_id = session.get("open_id", "") if session else ""
+            if open_id:
+                _ws_broadcast(open_id, {
+                    "type": "complete",
+                    "thread_id": thread_id,
+                    "data": {
+                        "summary": final_state.get("summary", ""),
+                        "artifacts": final_state.get("artifacts", {}),
+                    },
+                })
             session_manager.delete_session(thread_id)
             logger.debug("Resume worker done: thread_id=%s", thread_id)
 

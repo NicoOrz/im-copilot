@@ -7,17 +7,23 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import FastAPI, Form, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from langgraph.types import Command
+from starlette.middleware.sessions import SessionMiddleware
 
 import lark_oapi as lark
 
 from im_copilot.checkpointer import get_checkpointer
 from im_copilot.graph.pipeline import build_pipeline
 from im_copilot.state import PipelineState
+from im_copilot.timing import start_collecting, stop_collecting
+from im_copilot.user_session_store import session_store as user_session_store
+from im_copilot.user_token_store import token_store
+from im_copilot.web.auth import get_current_user, is_login_exempt, login_redirect_url
+from im_copilot.web.ws import ws_manager
 
 # In-memory cache for pending interrupts per thread_id
 # Maps thread_id -> interrupt payload
@@ -26,6 +32,8 @@ _interrupt_cache_lock = asyncio.Lock()
 
 # Checkpointer DB path (same as checkpointer.py default)
 DB_PATH = os.getenv("CHECKPOINTER_DB", ".copilot_checkpoints.sqlite")
+
+_DEBUG_MODE = os.getenv("IM_COPILOT_DEBUG") == "1"
 
 
 def _get_db_connection() -> sqlite3.Connection:
@@ -229,13 +237,27 @@ def _delete_session(thread_id: str) -> bool:
     cursor = conn.cursor()
     try:
         cursor.execute("DELETE FROM checkpoints WHERE thread_id = ?", (thread_id,))
+        deleted = cursor.rowcount
         cursor.execute("DELETE FROM writes WHERE thread_id = ?", (thread_id,))
+        deleted += cursor.rowcount
         conn.commit()
-        return cursor.rowcount > 0
+        return deleted > 0
     except sqlite3.OperationalError:
         return False
     finally:
         conn.close()
+
+
+def _user_can_access_thread(request: Request, thread_id: str) -> bool:
+    user = getattr(request.state, "user", None)
+    if not user:
+        return True
+    return user_session_store.has_session(user["open_id"], thread_id)
+
+
+def _require_thread_access(request: Request, thread_id: str) -> None:
+    if not _user_can_access_thread(request, thread_id):
+        raise HTTPException(status_code=404, detail="Session not found")
 
 
 def _start_lark_bot_thread() -> threading.Thread | None:
@@ -269,6 +291,7 @@ def _start_lark_bot_thread() -> threading.Thread | None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup/shutdown."""
+    ws_manager.bind_loop()
     ws_thread = None
     if os.getenv("LARK_BOT_ENABLED"):
         ws_thread = _start_lark_bot_thread()
@@ -295,40 +318,105 @@ templates_dir = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=templates_dir)
 
 
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    if is_login_exempt(request.url.path):
+        return await call_next(request)
+    user = get_current_user(request)
+    if user is None:
+        if request.url.path.startswith("/api/"):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        return RedirectResponse("/login", status_code=302)
+    request.state.user = user
+    return await call_next(request)
+
+
+# SessionMiddleware must be added AFTER auth_middleware so it sits outermost
+# (Starlette processes add_middleware in LIFO order)
+_SESSION_SECRET = os.getenv("SESSION_SECRET", "im-copilot-dev-secret-change-me")
+app.add_middleware(SessionMiddleware, secret_key=_SESSION_SECRET, max_age=7 * 24 * 3600)
+
+
+@app.get("/login", response_class=HTMLResponse)
+async def login_page(request: Request):
+    user = get_current_user(request)
+    if user is not None:
+        return RedirectResponse("/", status_code=302)
+    error = request.query_params.get("error", "")
+    error_msg = {
+        "network": "网络错误，请重试",
+        "auth": "授权失败",
+        "userinfo": "获取用户信息失败",
+        "state": "登录状态已失效，请重试",
+    }.get(error, "")
+    return templates.TemplateResponse(
+        request=request,
+        name="login.html",
+        context={"login_url": login_redirect_url(request), "error": error_msg},
+    )
+
+
+@app.get("/logout")
+async def logout(request: Request):
+    request.session.clear()
+    return RedirectResponse("/login", status_code=302)
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    sessions = _list_sessions()
+    user = request.state.user
+    sessions = _sessions_for_user(user)
     return templates.TemplateResponse(
         request=request,
         name="chat.html",
-        context={"sessions": sessions, "thread_id": None},
+        context={"sessions": sessions, "thread_id": None, "debug": _DEBUG_MODE, "user": user},
     )
 
 
 @app.get("/chat/{thread_id}", response_class=HTMLResponse)
 async def chat_page(request: Request, thread_id: str):
-    sessions = _list_sessions()
+    user = request.state.user
+    _require_thread_access(request, thread_id)
+    sessions = _sessions_for_user(user)
     return templates.TemplateResponse(
         request=request,
         name="chat.html",
-        context={"sessions": sessions, "thread_id": thread_id},
+        context={"sessions": sessions, "thread_id": thread_id, "debug": _DEBUG_MODE, "user": user},
     )
 
 
+def _sessions_for_user(user: dict | None) -> list[dict]:
+    if not user:
+        return _list_sessions()
+
+    user_sessions = user_session_store.list_sessions(user["open_id"])
+    all_sessions = {s["thread_id"]: s for s in _list_sessions()}
+    return [
+        {
+            **all_sessions.get(s["thread_id"], {"thread_id": s["thread_id"], "latest_step": 0}),
+            "source": s["source"],
+        }
+        for s in user_sessions
+    ]
+
+
 @app.get("/api/sessions")
-async def api_list_sessions():
-    sessions = _list_sessions()
-    return {"sessions": sessions}
+async def api_list_sessions(request: Request):
+    return {"sessions": _sessions_for_user(getattr(request.state, "user", None))}
 
 
 @app.post("/api/sessions")
-async def api_create_session():
+async def api_create_session(request: Request):
     thread_id = str(uuid.uuid4())
+    user = getattr(request.state, "user", None)
+    if user:
+        user_session_store.record_session(user["open_id"], thread_id, "web")
     return {"thread_id": thread_id, "created": True}
 
 
 @app.get("/api/sessions/{thread_id}")
-async def api_get_session(thread_id: str):
+async def api_get_session(request: Request, thread_id: str):
+    _require_thread_access(request, thread_id)
     history = _get_session_history(thread_id)
     if not history:
         return {"thread_id": thread_id, "history": [], "state": None}
@@ -339,22 +427,32 @@ async def api_get_session(thread_id: str):
 
 
 @app.get("/api/sessions/{thread_id}/history")
-async def api_get_session_history(thread_id: str):
+async def api_get_session_history(request: Request, thread_id: str):
+    _require_thread_access(request, thread_id)
     history = _get_session_history(thread_id)
     return {"thread_id": thread_id, "history": history}
 
 
 @app.delete("/api/sessions/{thread_id}")
-async def api_delete_session(thread_id: str):
+async def api_delete_session(request: Request, thread_id: str):
+    _require_thread_access(request, thread_id)
     deleted = _delete_session(thread_id)
     async with _interrupt_cache_lock:
         _interrupt_cache.pop(thread_id, None)
+    user = getattr(request.state, "user", None)
+    if user:
+        user_session_store.delete_session(user["open_id"], thread_id)
     return {"deleted": deleted}
 
 
 @app.post("/api/sessions/{thread_id}/chat")
-async def api_chat(thread_id: str, message: str = Form(...)):
+async def api_chat(request: Request, thread_id: str, message: str = Form(...)):
     from im_copilot.commands import parse_command, execute_command
+
+    _require_thread_access(request, thread_id)
+    user = getattr(request.state, "user", None)
+    if user:
+        user_session_store.record_session(user["open_id"], thread_id, "web")
 
     parsed = parse_command(message.strip())
     if parsed is not None:
@@ -362,6 +460,8 @@ async def api_chat(thread_id: str, message: str = Form(...)):
         cmd_result = execute_command(cmd_name, cmd_args, thread_id, thread_id, source="web")
         if cmd_result.metadata.get("action") == "reset_thread":
             new_thread_id = str(uuid.uuid4())
+            if user:
+                user_session_store.record_session(user["open_id"], new_thread_id, "web")
             return JSONResponse({
                 "status": "command",
                 "command": "new",
@@ -374,7 +474,15 @@ async def api_chat(thread_id: str, message: str = Form(...)):
             "message": cmd_result.response_text,
         })
 
+    open_id = user["open_id"] if user else ""
+    user_access_token = ""
+    if open_id:
+        user_access_token = token_store.get(open_id) or ""
+
     cp_type = os.getenv("CHECKPOINTER_TYPE", "sqlite")
+
+    if _DEBUG_MODE:
+        start_collecting()
 
     with get_checkpointer(cp_type) as checkpointer:
         graph = build_pipeline(checkpointer=checkpointer)
@@ -385,6 +493,8 @@ async def api_chat(thread_id: str, message: str = Form(...)):
             "chat_id": thread_id,
             "message_id": str(uuid.uuid4()),
             "source": "web",
+            "user_id": open_id,
+            "user_access_token": user_access_token,
             "message_history": [{"role": "user", "content": message}],
             "errors": [],
             "checks": [],
@@ -394,7 +504,11 @@ async def api_chat(thread_id: str, message: str = Form(...)):
         try:
             result = graph.invoke(initial_state, config=config)
         except Exception as e:
+            if _DEBUG_MODE:
+                stop_collecting()
             raise HTTPException(status_code=500, detail=str(e))
+
+    timing_data = stop_collecting().to_dict() if _DEBUG_MODE else None
 
     # Handle interrupt
     if "__interrupt__" in result:
@@ -414,26 +528,30 @@ async def api_chat(thread_id: str, message: str = Form(...)):
 
         async with _interrupt_cache_lock:
             _interrupt_cache[thread_id] = payload
-        return JSONResponse({
-            "status": "interrupted",
-            **payload,
-        })
+        response: dict = {"status": "interrupted", **payload}
+        if timing_data:
+            response["timing"] = timing_data
+        return JSONResponse(response)
 
     # Complete
     async with _interrupt_cache_lock:
         _interrupt_cache.pop(thread_id, None)
 
-    return JSONResponse({
+    response: dict = {
         "status": "complete",
         "summary": result.get("summary", ""),
         "artifacts": result.get("artifacts", {}),
         "plan": result.get("plan", []),
         "checks": result.get("checks", []),
-    })
+    }
+    if timing_data:
+        response["timing"] = timing_data
+    return JSONResponse(response)
 
 
 @app.post("/api/sessions/{thread_id}/resume")
-async def api_resume(thread_id: str, decision: str = Form(...)):
+async def api_resume(request: Request, thread_id: str, decision: str = Form(...)):
+    _require_thread_access(request, thread_id)
     async with _interrupt_cache_lock:
         if thread_id not in _interrupt_cache:
             raise HTTPException(status_code=400, detail="No pending interrupt for this session")
@@ -443,6 +561,9 @@ async def api_resume(thread_id: str, decision: str = Form(...)):
 
     cp_type = os.getenv("CHECKPOINTER_TYPE", "sqlite")
 
+    if _DEBUG_MODE:
+        start_collecting()
+
     with get_checkpointer(cp_type) as checkpointer:
         graph = build_pipeline(checkpointer=checkpointer)
         config = {"configurable": {"thread_id": thread_id}}
@@ -450,7 +571,11 @@ async def api_resume(thread_id: str, decision: str = Form(...)):
         try:
             result = graph.invoke(Command(resume=parsed_decision), config=config)
         except Exception as e:
+            if _DEBUG_MODE:
+                stop_collecting()
             raise HTTPException(status_code=500, detail=str(e))
+
+    timing_data = stop_collecting().to_dict() if _DEBUG_MODE else None
 
     # Handle another interrupt
     if "__interrupt__" in result:
@@ -470,26 +595,30 @@ async def api_resume(thread_id: str, decision: str = Form(...)):
 
         async with _interrupt_cache_lock:
             _interrupt_cache[thread_id] = payload
-        return JSONResponse({
-            "status": "interrupted",
-            **payload,
-        })
+        response: dict = {"status": "interrupted", **payload}
+        if timing_data:
+            response["timing"] = timing_data
+        return JSONResponse(response)
 
     # Complete
     async with _interrupt_cache_lock:
         _interrupt_cache.pop(thread_id, None)
 
-    return JSONResponse({
+    response: dict = {
         "status": "complete",
         "summary": result.get("summary", ""),
         "artifacts": result.get("artifacts", {}),
         "plan": result.get("plan", []),
         "checks": result.get("checks", []),
-    })
+    }
+    if timing_data:
+        response["timing"] = timing_data
+    return JSONResponse(response)
 
 
 @app.get("/api/sessions/{thread_id}/status")
-async def api_status(thread_id: str):
+async def api_status(request: Request, thread_id: str):
+    _require_thread_access(request, thread_id)
     async with _interrupt_cache_lock:
         cached = _interrupt_cache.get(thread_id)
     if cached is not None:
@@ -498,3 +627,94 @@ async def api_status(thread_id: str):
             **cached,
         })
     return JSONResponse({"status": "idle"})
+
+
+# --- Node LLM Configuration ---
+
+KNOWN_NODES = ["intent", "planner", "doc", "whiteboard", "slide", "verify", "side_agent", "deliver"]
+
+
+@app.get("/settings", response_class=HTMLResponse)
+async def settings_page(request: Request):
+    user = request.state.user
+    return templates.TemplateResponse(
+        request=request,
+        name="settings.html",
+        context={"nodes": KNOWN_NODES, "debug": _DEBUG_MODE, "user": user},
+    )
+
+
+@app.get("/api/config/nodes")
+async def api_get_node_config():
+    from im_copilot.llm import _load_node_config
+
+    config = _load_node_config()
+    masked = {}
+    for node in KNOWN_NODES:
+        node_cfg = config.get(node) or {}
+        if not node_cfg:
+            masked[node] = None
+            continue
+        entry = dict(node_cfg)
+        if entry.get("api_key"):
+            key = entry["api_key"]
+            entry["api_key"] = f"****{key[-4:]}" if len(key) > 4 else "****"
+        masked[node] = entry
+    return JSONResponse({
+        "nodes": masked,
+        "defaults": {
+            "base_url": os.getenv("VOLC_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3"),
+            "model": os.getenv("VOLC_MODEL", "ep-20260422180225-zllc4"),
+        },
+    })
+
+
+@app.post("/api/config/nodes")
+async def api_set_node_config(request: Request):
+    import im_copilot.llm as llm_module
+
+    body = await request.json()
+    config_path = os.getenv("NODE_LLM_CONFIG", "node_llm_config.json")
+    existing = llm_module._load_node_config()
+    clean = {}
+    for node in KNOWN_NODES:
+        node_cfg = body.get(node)
+        if not node_cfg:
+            continue
+        entry = {}
+        existing_entry = existing.get(node) or {}
+        for key in ("base_url", "model", "api_key"):
+            val = (node_cfg.get(key) or "").strip()
+            if val.startswith("****"):
+                if key in existing_entry:
+                    entry[key] = existing_entry[key]
+            elif val:
+                entry[key] = val
+        if entry:
+            clean[node] = entry
+
+    with open(config_path, "w") as f:
+        json.dump(clean, f, indent=2, ensure_ascii=False)
+
+    llm_module._config_cache = None
+    llm_module._config_cache_ts = 0.0
+    return JSONResponse({"saved": True})
+
+
+# --- WebSocket for real-time Feishu message push ---
+
+@app.websocket("/ws/{open_id}")
+async def websocket_endpoint(websocket: WebSocket, open_id: str):
+    session_open_id = websocket.session.get("open_id") if "session" in websocket.scope else None
+    if not session_open_id or session_open_id != open_id:
+        await websocket.close(code=1008)
+        return
+
+    await ws_manager.connect(websocket, open_id)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        await ws_manager.disconnect(websocket, open_id)

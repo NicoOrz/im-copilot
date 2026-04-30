@@ -2,7 +2,7 @@ import logging
 import re
 
 from im_copilot.lark_cli import run_lark_cli
-from im_copilot.llm import get_llm
+from im_copilot.llm import get_llm_for_node
 from im_copilot.state import PipelineState
 
 logger = logging.getLogger(__name__)
@@ -22,19 +22,13 @@ WHITEBOARD_PROMPT = """你是一位专业的可视化设计助手。请根据用
 - 不要添加额外解释"""
 
 
-def _get_llm():
-    if not hasattr(_get_llm, "_instance"):
-        _get_llm._instance = get_llm()
-    return _get_llm._instance
-
-
 def whiteboard_node(state: PipelineState) -> dict:
     topic = state.get("intent_params", {}).get("topic", "未命名白板")
     raw_message = state.get("raw_message", "")
     uat = state.get("user_access_token", "")
     title = f"白板：{topic}"
 
-    mermaid = _get_llm().invoke(WHITEBOARD_PROMPT.format(topic=topic, raw_message=raw_message)).content.strip()
+    mermaid = get_llm_for_node("whiteboard").invoke(WHITEBOARD_PROMPT.format(topic=topic, raw_message=raw_message)).content.strip()
 
     result = {
         "kind": "whiteboard",

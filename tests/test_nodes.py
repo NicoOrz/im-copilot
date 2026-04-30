@@ -22,7 +22,7 @@ class MockLLM:
 
 
 class IntentNodeTests(unittest.TestCase):
-    @patch("im_copilot.graph.nodes.intent_node._get_llm")
+    @patch("im_copilot.graph.nodes.intent_node.get_llm_for_node")
     def test_classifies_doc_intent(self, mock_get_llm):
         mock_llm = MockLLM()
         mock_llm.invoke.return_value = MagicMock(intent_type="create_doc", topic="帮我写一份产品方案", confidence=0.95)
@@ -31,7 +31,7 @@ class IntentNodeTests(unittest.TestCase):
         self.assertEqual(result["intent_type"], "create_doc")
         self.assertEqual(result["intent_params"]["topic"], "帮我写一份产品方案")
 
-    @patch("im_copilot.graph.nodes.intent_node._get_llm")
+    @patch("im_copilot.graph.nodes.intent_node.get_llm_for_node")
     def test_classifies_multi_intent(self, mock_get_llm):
         mock_llm = MockLLM()
         mock_llm.invoke.return_value = MagicMock(intent_type="create_multi", topic="Q2报告", confidence=0.9)
@@ -41,7 +41,7 @@ class IntentNodeTests(unittest.TestCase):
 
 
 class PlannerNodeTests(unittest.TestCase):
-    @patch("im_copilot.graph.nodes.planner_node._get_llm")
+    @patch("im_copilot.graph.nodes.planner_node.get_llm_for_node")
     def test_maps_multi_intent_to_all_business_steps(self, mock_get_llm):
         mock_llm = MockLLM()
         mock_llm.invoke.return_value = MagicMock(
@@ -53,7 +53,7 @@ class PlannerNodeTests(unittest.TestCase):
         result = planner_node({"intent_type": "create_multi"})
         self.assertEqual(result["plan"], ["doc", "whiteboard", "slide", "deliver"])
 
-    @patch("im_copilot.graph.nodes.planner_node._get_llm")
+    @patch("im_copilot.graph.nodes.planner_node.get_llm_for_node")
     def test_maps_chat_to_deliver_only(self, mock_get_llm):
         mock_llm = MockLLM()
         mock_llm.invoke.return_value = MagicMock(
@@ -65,7 +65,7 @@ class PlannerNodeTests(unittest.TestCase):
         result = planner_node({"intent_type": "chat"})
         self.assertEqual(result["plan"], ["deliver"])
 
-    @patch("im_copilot.graph.nodes.planner_node._get_llm")
+    @patch("im_copilot.graph.nodes.planner_node.get_llm_for_node")
     def test_needs_clarification(self, mock_get_llm):
         mock_llm = MockLLM()
         mock_llm.invoke.return_value = MagicMock(
@@ -80,7 +80,7 @@ class PlannerNodeTests(unittest.TestCase):
 
 
 class MockNodeTests(unittest.TestCase):
-    @patch("im_copilot.graph.nodes.doc_node._get_llm")
+    @patch("im_copilot.graph.nodes.doc_node.get_llm_for_node")
     def test_doc_node_adds_doc_result(self, mock_get_llm):
         mock_llm = MockLLM()
         mock_llm.invoke.return_value = MagicMock(content="文档内容")
@@ -90,7 +90,7 @@ class MockNodeTests(unittest.TestCase):
         self.assertEqual(result["artifacts"]["doc"]["status"], "created")
         self.assertEqual(result["artifacts"]["doc"]["preview"], "文档内容")
 
-    @patch("im_copilot.graph.nodes.whiteboard_node._get_llm")
+    @patch("im_copilot.graph.nodes.whiteboard_node.get_llm_for_node")
     def test_whiteboard_node_preserves_existing_results(self, mock_get_llm):
         mock_llm = MockLLM()
         mock_llm.invoke.return_value = MagicMock(content="白板内容")
@@ -99,7 +99,7 @@ class MockNodeTests(unittest.TestCase):
         self.assertIn("doc", result["artifacts"])
         self.assertEqual(result["artifacts"]["whiteboard"]["kind"], "whiteboard")
 
-    @patch("im_copilot.graph.nodes.slide_node._get_llm")
+    @patch("im_copilot.graph.nodes.slide_node.get_llm_for_node")
     def test_slide_node_adds_slide_result(self, mock_get_llm):
         mock_llm = MockLLM()
         mock_llm.invoke.return_value = MagicMock(content="PPT内容")
@@ -109,7 +109,7 @@ class MockNodeTests(unittest.TestCase):
 
 
 class DeliverNodeTests(unittest.TestCase):
-    @patch("im_copilot.graph.nodes.deliver_node._get_llm")
+    @patch("im_copilot.graph.nodes.deliver_node.get_llm_for_node")
     def test_deliver_chat_summary(self, mock_get_llm):
         mock_llm = MockLLM()
         mock_llm.invoke.return_value = MagicMock(content="收到，你好！")
@@ -117,7 +117,7 @@ class DeliverNodeTests(unittest.TestCase):
         result = deliver_node({"intent_type": "chat", "plan": ["deliver"], "errors": [], "raw_message": "你好"})
         self.assertEqual(result["summary"], "收到，你好！")
 
-    @patch("im_copilot.graph.nodes.deliver_node._get_llm")
+    @patch("im_copilot.graph.nodes.deliver_node.get_llm_for_node")
     def test_deliver_artifacts(self, mock_get_llm):
         mock_llm = MockLLM()
         mock_llm.invoke.return_value = MagicMock(content="汇总结果")
@@ -138,7 +138,7 @@ class DeliverNodeTests(unittest.TestCase):
 
 
 class VerifyNodeTests(unittest.TestCase):
-    @patch("im_copilot.graph.nodes.verify_node._get_llm")
+    @patch("im_copilot.graph.nodes.verify_node.get_llm_for_node")
     def test_verify_pass(self, mock_get_llm):
         mock_llm = MockLLM()
         mock_llm.invoke.return_value = MagicMock(status="pass", reason="质量合格")
@@ -153,7 +153,7 @@ class VerifyNodeTests(unittest.TestCase):
         self.assertEqual(result["checks"][0]["status"], "pass")
         self.assertEqual(result["reflection_iteration"], 1)
 
-    @patch("im_copilot.graph.nodes.verify_node._get_llm")
+    @patch("im_copilot.graph.nodes.verify_node.get_llm_for_node")
     def test_verify_revise(self, mock_get_llm):
         mock_llm = MockLLM()
         mock_llm.invoke.return_value = MagicMock(status="revise", reason="内容不完整")
@@ -175,7 +175,7 @@ class VerifyNodeTests(unittest.TestCase):
 
 
 class SideAgentNodeTests(unittest.TestCase):
-    @patch("im_copilot.graph.nodes.side_agent_node._get_llm")
+    @patch("im_copilot.graph.nodes.side_agent_node.get_llm_for_node")
     def test_side_agent_evaluates_content(self, mock_get_llm):
         mock_llm = MockLLM()
         mock_llm.invoke.return_value = MagicMock(

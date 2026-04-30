@@ -25,6 +25,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     _configure_logging(args.debug)
 
+    if args.debug:
+        os.environ["IM_COPILOT_DEBUG"] = "1"
+
     if args.web and args.lark_bot:
         return _run_web_server(args.host, args.port, with_lark_bot=True)
 

@@ -6,7 +6,19 @@
 <aside class="sidebar">
     <div class="sidebar-header">
         <h1>IM Copilot</h1>
-        <button id="new-session-btn" class="btn btn-primary">+ 新会话</button>
+        {% if user %}
+        <div class="user-info">
+            {% if user.avatar_url %}
+            <img src="{{ user.avatar_url }}" class="user-avatar" alt="">
+            {% endif %}
+            <span class="user-name">{{ user.name or user.open_id[:8] }}</span>
+            <a href="/logout" class="user-logout" title="退出">退出</a>
+        </div>
+        {% endif %}
+        <div style="display:flex;gap:6px;margin-top:8px">
+            <button id="new-session-btn" class="btn btn-primary" style="flex:1">+ 新会话</button>
+            <a href="/settings" class="btn btn-secondary" style="padding:10px 12px;text-decoration:none;text-align:center">设置</a>
+        </div>
     </div>
     <div class="session-list" id="session-list">
         {% for session in sessions %}
@@ -31,6 +43,10 @@
     </div>
 
     <div class="chat-input-area">
+        <div id="timing-panel" class="timing-panel" style="display: none;">
+            <div class="timing-header" id="timing-header"></div>
+            <div class="timing-bars" id="timing-bars"></div>
+        </div>
         <div class="typing-indicator" id="typing-indicator" style="display: none;">
             <span></span><span></span><span></span>
         </div>
@@ -56,5 +72,7 @@
 
 <script>
 window.CURRENT_THREAD_ID = {{ thread_id | tojson }};
+window.DEBUG_MODE = {{ debug | tojson }};
+window.CURRENT_USER = {{ user | tojson }};
 </script>
 {% endblock %}

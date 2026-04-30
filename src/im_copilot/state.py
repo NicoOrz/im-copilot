@@ -55,7 +55,7 @@ class PipelineState(TypedDict, total=False):
     raw_message: str
     chat_id: str
     message_id: str
-    source: Literal["feishu", "cli"]
+    source: Literal["feishu", "cli", "web"]
 
     intent_type: IntentType
     intent_params: dict[str, str]

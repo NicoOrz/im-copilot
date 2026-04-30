@@ -1,7 +1,7 @@
 import logging
 
 from im_copilot.lark_cli import run_lark_cli
-from im_copilot.llm import get_llm
+from im_copilot.llm import get_llm_for_node
 from im_copilot.state import PipelineState
 
 logger = logging.getLogger(__name__)
@@ -24,19 +24,13 @@ SLIDE_PROMPT = """你是一位专业的PPT设计助手。请根据用户提供�
   <slide xmlns="http://www.larkoffice.com/sml/2.0"><data><shape type="text" topLeftX="80" topLeftY="200" width="800" height="100"><content textType="title"><p>标题</p></content></shape></data></slide>"""
 
 
-def _get_llm():
-    if not hasattr(_get_llm, "_instance"):
-        _get_llm._instance = get_llm()
-    return _get_llm._instance
-
-
 def slide_node(state: PipelineState) -> dict:
     topic = state.get("intent_params", {}).get("topic", "未命名PPT")
     raw_message = state.get("raw_message", "")
     uat = state.get("user_access_token", "")
     title = f"PPT：{topic}"
 
-    slides_xml = _get_llm().invoke(SLIDE_PROMPT.format(topic=topic, raw_message=raw_message)).content.strip()
+    slides_xml = get_llm_for_node("slide").invoke(SLIDE_PROMPT.format(topic=topic, raw_message=raw_message)).content.strip()
 
     result = {
         "kind": "slide",

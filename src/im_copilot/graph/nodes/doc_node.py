@@ -1,7 +1,7 @@
 import logging
 
 from im_copilot.lark_cli import run_lark_cli
-from im_copilot.llm import get_llm
+from im_copilot.llm import get_llm_for_node
 from im_copilot.state import PipelineState
 
 logger = logging.getLogger(__name__)
@@ -20,19 +20,13 @@ DOC_PROMPT = """你是一位专业的文档撰写助手。请根据用户提供�
 - 不要添加额外解释"""
 
 
-def _get_llm():
-    if not hasattr(_get_llm, "_instance"):
-        _get_llm._instance = get_llm()
-    return _get_llm._instance
-
-
 def doc_node(state: PipelineState) -> dict:
     topic = state.get("intent_params", {}).get("topic", "未命名文档")
     raw_message = state.get("raw_message", "")
     uat = state.get("user_access_token", "")
     title = f"文档：{topic}"
 
-    markdown = _get_llm().invoke(DOC_PROMPT.format(topic=topic, raw_message=raw_message)).content.strip()
+    markdown = get_llm_for_node("doc").invoke(DOC_PROMPT.format(topic=topic, raw_message=raw_message)).content.strip()
 
     result = {
         "kind": "doc",

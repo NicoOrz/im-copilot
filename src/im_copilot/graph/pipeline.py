@@ -1,3 +1,9 @@
+import logging
+import time
+from collections.abc import Callable
+from functools import wraps
+from typing import Any
+
 from langgraph.graph import END, START, StateGraph
 
 from im_copilot.checkpointer import get_checkpointer
@@ -12,6 +18,148 @@ from im_copilot.graph.nodes.side_agent_node import side_agent_node
 from im_copilot.graph.nodes.verify_node import verify_node
 from im_copilot.graph.nodes.whiteboard_node import whiteboard_node
 from im_copilot.state import PipelineState
+
+logger = logging.getLogger(__name__)
+
+
+def _thread_id_from_config(config: dict | None) -> str:
+    if not isinstance(config, dict):
+        return ""
+    configurable = config.get("configurable", {})
+    if not isinstance(configurable, dict):
+        return ""
+    return str(configurable.get("thread_id") or "")
+
+
+def _status_code_from_exception(exc: BaseException) -> int | None:
+    status_code = getattr(exc, "status_code", None)
+    if status_code is None:
+        response = getattr(exc, "response", None)
+        status_code = getattr(response, "status_code", None)
+    if status_code is None:
+        status_code = getattr(exc, "code", None)
+    try:
+        return int(status_code) if status_code is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _classify_exception(exc: BaseException) -> str:
+    if _status_code_from_exception(exc) == 429:
+        return "rate_limited"
+    message = str(exc).lower()
+    if "429" in message or "rate limit" in message or "too many requests" in message:
+        return "rate_limited"
+    if type(exc).__name__ == "GraphInterrupt":
+        return "interrupted"
+    return "error"
+
+
+def _timed_node(node_name: str, node: Callable[..., Any]) -> Callable[..., Any]:
+    @wraps(node)
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        start = time.perf_counter()
+        status = "success"
+        exc: BaseException | None = None
+        try:
+            return node(*args, **kwargs)
+        except BaseException as err:
+            exc = err
+            status = _classify_exception(err)
+            raise
+        finally:
+            duration_ms = (time.perf_counter() - start) * 1000
+            logger.info(
+                "langgraph node timing: node=%s status=%s duration_ms=%.2f error=%s status_code=%s",
+                node_name,
+                status,
+                duration_ms,
+                type(exc).__name__ if exc else "",
+                _status_code_from_exception(exc) if exc else "",
+            )
+            from im_copilot.timing import get_collector
+
+            collector = get_collector()
+            if collector is not None:
+                collector.record(node_name, start * 1000, duration_ms, status)
+
+    return wrapped
+
+
+class TimedGraph:
+    def __init__(self, graph: Any, graph_name: str = "pipeline") -> None:
+        self._graph = graph
+        self._graph_name = graph_name
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._graph, name)
+
+    def invoke(self, input: Any, config: dict | None = None, **kwargs: Any) -> Any:
+        start = time.perf_counter()
+        status = "success"
+        exc: BaseException | None = None
+        try:
+            result = self._graph.invoke(input, config=config, **kwargs)
+            if isinstance(result, dict) and "__interrupt__" in result:
+                status = "interrupted"
+            return result
+        except BaseException as err:
+            exc = err
+            status = _classify_exception(err)
+            raise
+        finally:
+            self._log_graph_timing("invoke", config, start, status, exc)
+
+    def stream(self, input: Any, config: dict | None = None, **kwargs: Any) -> Any:
+        start = time.perf_counter()
+        status = "success"
+        exc: BaseException | None = None
+        thread_id = _thread_id_from_config(config)
+
+        try:
+            for step in self._graph.stream(input, config=config, **kwargs):
+                if isinstance(step, dict) and "__interrupt__" in step:
+                    status = "interrupted"
+                yield step
+        except GeneratorExit:
+            if status == "success":
+                status = "closed"
+            raise
+        except BaseException as err:
+            exc = err
+            status = _classify_exception(err)
+            raise
+        finally:
+            duration_ms = (time.perf_counter() - start) * 1000
+            logger.info(
+                "langgraph call timing: graph=%s mode=stream thread_id=%s status=%s duration_ms=%.2f error=%s status_code=%s",
+                self._graph_name,
+                thread_id,
+                status,
+                duration_ms,
+                type(exc).__name__ if exc else "",
+                _status_code_from_exception(exc) if exc else "",
+            )
+
+    def _log_graph_timing(
+        self,
+        mode: str,
+        config: dict | None,
+        start: float,
+        status: str,
+        exc: BaseException | None,
+    ) -> None:
+        duration_ms = (time.perf_counter() - start) * 1000
+        logger.info(
+            "langgraph call timing: graph=%s mode=%s thread_id=%s status=%s duration_ms=%.2f error=%s status_code=%s",
+            self._graph_name,
+            mode,
+            _thread_id_from_config(config),
+            status,
+            duration_ms,
+            type(exc).__name__ if exc else "",
+            _status_code_from_exception(exc) if exc else "",
+        )
 
 
 def route_after_planner(state: PipelineState) -> str:
@@ -100,18 +248,18 @@ def route_after_verify_node(state: PipelineState) -> dict:
 
 def build_pipeline(checkpointer=None):
     builder = StateGraph(PipelineState)
-    builder.add_node("intent", intent_node)
-    builder.add_node("planner", planner_node)
-    builder.add_node("clarification", clarification_node)
-    builder.add_node("plan_approval", plan_approval_node)
-    builder.add_node("doc", doc_node)
-    builder.add_node("whiteboard", whiteboard_node)
-    builder.add_node("slide", slide_node)
-    builder.add_node("verify", verify_node)
-    builder.add_node("side_agent", side_agent_node)
-    builder.add_node("route_content", route_content_node)
-    builder.add_node("route_after_verify", route_after_verify_node)
-    builder.add_node("deliver", deliver_node)
+    builder.add_node("intent", _timed_node("intent", intent_node))
+    builder.add_node("planner", _timed_node("planner", planner_node))
+    builder.add_node("clarification", _timed_node("clarification", clarification_node))
+    builder.add_node("plan_approval", _timed_node("plan_approval", plan_approval_node))
+    builder.add_node("doc", _timed_node("doc", doc_node))
+    builder.add_node("whiteboard", _timed_node("whiteboard", whiteboard_node))
+    builder.add_node("slide", _timed_node("slide", slide_node))
+    builder.add_node("verify", _timed_node("verify", verify_node))
+    builder.add_node("side_agent", _timed_node("side_agent", side_agent_node))
+    builder.add_node("route_content", _timed_node("route_content", route_content_node))
+    builder.add_node("route_after_verify", _timed_node("route_after_verify", route_after_verify_node))
+    builder.add_node("deliver", _timed_node("deliver", deliver_node))
 
     builder.add_edge(START, "intent")
     builder.add_edge("intent", "planner")
@@ -154,7 +302,7 @@ def build_pipeline(checkpointer=None):
         ["doc", "whiteboard", "slide", "deliver"],
     )
     builder.add_edge("deliver", END)
-    return builder.compile(checkpointer=checkpointer)
+    return TimedGraph(builder.compile(checkpointer=checkpointer))
 
 
 def run_pipeline(

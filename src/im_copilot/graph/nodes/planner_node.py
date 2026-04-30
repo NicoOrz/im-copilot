@@ -3,7 +3,7 @@ from pydantic import BaseModel, Field
 import os
 
 from im_copilot.graph.nodes.history_utils import format_history
-from im_copilot.llm import get_llm
+from im_copilot.llm import get_llm_for_node
 from im_copilot.state import PipelineState
 
 _CLARIFICATION_THRESHOLD = float(os.getenv("CLARIFICATION_CONFIDENCE_THRESHOLD", "0.7"))
@@ -61,14 +61,15 @@ class PlannerOutput(BaseModel):
     )
 
 
-def _get_llm():
-    """Lazy-load the LLM client to avoid import-time construction."""
-    if not hasattr(_get_llm, "_instance"):
-        _get_llm._instance = get_llm().with_structured_output(PlannerOutput)
-    return _get_llm._instance
-
-
 def planner_node(state: PipelineState) -> dict:
+    if state.get("pending_questions"):
+        return {
+            "plan": [],
+            "pending_questions": state["pending_questions"],
+        }
+    if state.get("plan"):
+        return {"plan": state["plan"]}
+
     intent_type = state.get("intent_type", "chat")
     topic = state.get("intent_params", {}).get("topic", "")
     confidence = state.get("intent_confidence", 1.0)
@@ -91,7 +92,7 @@ def planner_node(state: PipelineState) -> dict:
         message_history=format_history(state.get("message_history", [])[:-1]),
         clarification_history=history_text,
     )
-    result: PlannerOutput = _get_llm().invoke(prompt)
+    result: PlannerOutput = get_llm_for_node("planner").with_structured_output(PlannerOutput).invoke(prompt)
 
     if result.needs_clarification and allow_clarification:
         return {

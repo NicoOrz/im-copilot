@@ -34,6 +34,7 @@ class SessionManager:
         card_id: str | None = None,
         card_entity_id: str | None = None,
         chat_id: str | None = None,
+        open_id: str | None = None,
     ) -> dict:
         """Save a new session and return its data.
 
@@ -55,6 +56,7 @@ class SessionManager:
             "card_id": card_id,
             "card_message_id": card_id,
             "card_entity_id": card_entity_id,
+            "open_id": open_id or "",
             "last_interrupt": None,
             "sequence": 0,
             "created_at": time.time(),
