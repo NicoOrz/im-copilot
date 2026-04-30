@@ -10,6 +10,7 @@ import urllib.parse
 import httpx
 from fastapi import Request
 from fastapi.responses import RedirectResponse
+from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 
 
 _FEISHU_AUTHORIZE_URL = "https://accounts.feishu.cn/open-apis/authen/v1/authorize"
@@ -28,6 +29,31 @@ _WEB_OAUTH_SCOPES = " ".join([
 ])
 
 _LOGIN_EXEMPT_PATHS = frozenset({"/login", "/logout", "/oauth/callback", "/static"})
+_OAUTH_STATE_MAX_AGE_SECONDS = 10 * 60
+
+
+def _session_secret() -> str:
+    return os.environ.get("SESSION_SECRET", "im-copilot-dev-secret-change-me")
+
+
+def _state_serializer() -> URLSafeTimedSerializer:
+    return URLSafeTimedSerializer(_session_secret(), salt="im-copilot-oauth-state")
+
+
+def _sign_web_state(nonce: str) -> str:
+    return _state_serializer().dumps({"flow": "web", "nonce": nonce})
+
+
+def validate_web_state(state: dict) -> bool:
+    token = state.get("token")
+    nonce = state.get("nonce")
+    if not token or not nonce:
+        return False
+    try:
+        payload = _state_serializer().loads(token, max_age=_OAUTH_STATE_MAX_AGE_SECONDS)
+    except (BadSignature, SignatureExpired):
+        return False
+    return payload.get("flow") == "web" and payload.get("nonce") == nonce
 
 
 def login_redirect_url(request: Request | None = None) -> str:
@@ -36,7 +62,7 @@ def login_redirect_url(request: Request | None = None) -> str:
     nonce = secrets.token_urlsafe(16)
     if request is not None:
         request.session["oauth_nonce"] = nonce
-    state = json.dumps({"flow": "web", "nonce": nonce})
+    state = json.dumps({"flow": "web", "nonce": nonce, "token": _sign_web_state(nonce)})
     return (
         f"{_FEISHU_AUTHORIZE_URL}"
         f"?app_id={urllib.parse.quote(app_id)}"

@@ -64,7 +64,9 @@ async def oauth_callback(request: Request) -> HTMLResponse | RedirectResponse:
         state_data = json.loads(state_raw)
         if isinstance(state_data, dict) and state_data.get("flow") == "web":
             flow = "web"
-            if state_data.get("nonce") != request.session.get("oauth_nonce"):
+            from im_copilot.web.auth import validate_web_state
+
+            if not validate_web_state(state_data):
                 return RedirectResponse("/login?error=state", status_code=302)
     except (json.JSONDecodeError, TypeError):
         pass
