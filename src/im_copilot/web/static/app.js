@@ -18,6 +18,7 @@ const modalFooter = document.getElementById('modal-footer');
 let currentThreadId = window.CURRENT_THREAD_ID || null;
 let isProcessing = false;
 let ws = null;
+let statusPollTimer = null;
 
 // Initialize
 function init() {
@@ -51,6 +52,13 @@ async function checkPendingInterrupt(threadId) {
         const data = await res.json();
         if (data.status === 'interrupted') {
             handleInterrupt(data);
+        } else if (data.status === 'processing') {
+            setProcessing(true);
+            startStatusPolling();
+        } else if (data.status === 'complete') {
+            handleComplete(data);
+        } else if (data.status === 'error') {
+            addMessage('assistant', data.message || '恢复执行时出错。');
         }
     } catch (err) {
         console.error('Failed to check interrupt status:', err);
@@ -319,6 +327,7 @@ async function handleSubmit(e) {
     addMessage('user', message);
     messageInput.value = '';
     setProcessing(true);
+    let keepProcessing = false;
 
     try {
         const res = await fetch(`${API_BASE}/sessions/${currentThreadId}/chat`, {
@@ -332,12 +341,17 @@ async function handleSubmit(e) {
             handleInterrupt(data);
         } else if (data.status === 'complete') {
             handleComplete(data);
+        } else if (data.status === 'processing') {
+            keepProcessing = true;
+            startStatusPolling();
         }
     } catch (err) {
         console.error('Chat error:', err);
         addMessage('assistant', '抱歉，处理消息时出错了。请重试。');
     } finally {
-        setProcessing(false);
+        if (!keepProcessing) {
+            setProcessing(false);
+        }
     }
 }
 
@@ -423,6 +437,7 @@ function closeModal() {
 async function approvePlan() {
     closeModal();
     setProcessing(true);
+    let keepProcessing = false;
     try {
         const res = await fetch(`${API_BASE}/sessions/${currentThreadId}/resume`, {
             method: 'POST',
@@ -434,12 +449,17 @@ async function approvePlan() {
             handleInterrupt(data);
         } else if (data.status === 'complete') {
             handleComplete(data);
+        } else if (data.status === 'processing') {
+            keepProcessing = true;
+            startStatusPolling();
         }
     } catch (err) {
         console.error('Resume error:', err);
         addMessage('assistant', '恢复执行时出错。');
     } finally {
-        setProcessing(false);
+        if (!keepProcessing) {
+            setProcessing(false);
+        }
     }
 }
 
@@ -447,6 +467,7 @@ async function approvePlan() {
 async function rejectPlan() {
     closeModal();
     setProcessing(true);
+    let keepProcessing = false;
     try {
         const res = await fetch(`${API_BASE}/sessions/${currentThreadId}/resume`, {
             method: 'POST',
@@ -458,12 +479,17 @@ async function rejectPlan() {
             handleInterrupt(data);
         } else if (data.status === 'complete') {
             handleComplete(data);
+        } else if (data.status === 'processing') {
+            keepProcessing = true;
+            startStatusPolling();
         }
     } catch (err) {
         console.error('Resume error:', err);
         addMessage('assistant', '恢复执行时出错。');
     } finally {
-        setProcessing(false);
+        if (!keepProcessing) {
+            setProcessing(false);
+        }
     }
 }
 
@@ -476,6 +502,7 @@ async function submitClarification(count) {
 
     closeModal();
     setProcessing(true);
+    let keepProcessing = false;
     try {
         const res = await fetch(`${API_BASE}/sessions/${currentThreadId}/resume`, {
             method: 'POST',
@@ -487,12 +514,17 @@ async function submitClarification(count) {
             handleInterrupt(data);
         } else if (data.status === 'complete') {
             handleComplete(data);
+        } else if (data.status === 'processing') {
+            keepProcessing = true;
+            startStatusPolling();
         }
     } catch (err) {
         console.error('Resume error:', err);
         addMessage('assistant', '恢复执行时出错。');
     } finally {
-        setProcessing(false);
+        if (!keepProcessing) {
+            setProcessing(false);
+        }
     }
 }
 
@@ -500,6 +532,7 @@ async function submitClarification(count) {
 async function submitGeneric(approved) {
     closeModal();
     setProcessing(true);
+    let keepProcessing = false;
     try {
         const res = await fetch(`${API_BASE}/sessions/${currentThreadId}/resume`, {
             method: 'POST',
@@ -511,17 +544,23 @@ async function submitGeneric(approved) {
             handleInterrupt(data);
         } else if (data.status === 'complete') {
             handleComplete(data);
+        } else if (data.status === 'processing') {
+            keepProcessing = true;
+            startStatusPolling();
         }
     } catch (err) {
         console.error('Resume error:', err);
         addMessage('assistant', '恢复执行时出错。');
     } finally {
-        setProcessing(false);
+        if (!keepProcessing) {
+            setProcessing(false);
+        }
     }
 }
 
 // Handle complete response
 function handleComplete(data) {
+    stopStatusPolling();
     const summary = data.summary || '处理完成';
     addMessage('assistant', summary);
 
@@ -534,6 +573,37 @@ function handleComplete(data) {
     // Show timing panel in debug mode
     if (window.DEBUG_MODE && data.timing) {
         renderTiming(data.timing);
+    }
+}
+
+function startStatusPolling() {
+    if (statusPollTimer || !currentThreadId) return;
+    statusPollTimer = setInterval(checkProcessingStatus, 3000);
+}
+
+function stopStatusPolling() {
+    if (!statusPollTimer) return;
+    clearInterval(statusPollTimer);
+    statusPollTimer = null;
+}
+
+async function checkProcessingStatus() {
+    if (!currentThreadId) return;
+    try {
+        const res = await fetch(`${API_BASE}/sessions/${currentThreadId}/status`);
+        const data = await res.json();
+        if (data.status === 'processing' || data.status === 'idle') return;
+        stopStatusPolling();
+        setProcessing(false);
+        if (data.status === 'interrupted') {
+            handleInterrupt(data);
+        } else if (data.status === 'complete') {
+            handleComplete(data);
+        } else if (data.status === 'error') {
+            addMessage('assistant', data.message || '恢复执行时出错。');
+        }
+    } catch (err) {
+        console.error('Status polling error:', err);
     }
 }
 

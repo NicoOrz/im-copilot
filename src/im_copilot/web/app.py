@@ -7,7 +7,7 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Form, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import BackgroundTasks, FastAPI, Form, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -29,6 +29,8 @@ from im_copilot.web.ws import ws_manager
 # Maps thread_id -> interrupt payload
 _interrupt_cache: dict[str, dict] = {}
 _interrupt_cache_lock = asyncio.Lock()
+_resume_status_cache: dict[str, dict] = {}
+_resume_status_lock = threading.Lock()
 
 # Checkpointer DB path (same as checkpointer.py default)
 DB_PATH = os.getenv("CHECKPOINTER_DB", ".copilot_checkpoints.sqlite")
@@ -260,6 +262,70 @@ def _require_thread_access(request: Request, thread_id: str) -> None:
         raise HTTPException(status_code=404, detail="Session not found")
 
 
+def _result_response(result: dict, timing_data: dict | None = None) -> dict:
+    response: dict = {
+        "status": "complete",
+        "summary": result.get("summary", ""),
+        "artifacts": result.get("artifacts", {}),
+        "plan": result.get("plan", []),
+        "checks": result.get("checks", []),
+    }
+    if timing_data:
+        response["timing"] = timing_data
+    return response
+
+
+def _interrupt_payload(result: dict, timing_data: dict | None = None) -> dict:
+    interrupt_data = result["__interrupt__"][0]
+    payload = {
+        "gate": interrupt_data.value["gate"],
+        "message": interrupt_data.value.get("message", ""),
+    }
+    for key in ("plan", "questions", "intent_type", "intent_params"):
+        if key in interrupt_data.value:
+            payload[key] = interrupt_data.value[key]
+    response: dict = {"status": "interrupted", **payload}
+    if timing_data:
+        response["timing"] = timing_data
+    return response
+
+
+def _set_resume_status(thread_id: str, status: dict) -> None:
+    with _resume_status_lock:
+        _resume_status_cache[thread_id] = status
+
+
+def _get_resume_status(thread_id: str) -> dict | None:
+    with _resume_status_lock:
+        return _resume_status_cache.get(thread_id)
+
+
+def _clear_resume_status(thread_id: str) -> None:
+    with _resume_status_lock:
+        _resume_status_cache.pop(thread_id, None)
+
+
+def _run_resume_background(thread_id: str, parsed_decision: dict | list, cp_type: str) -> None:
+    if _DEBUG_MODE:
+        start_collecting()
+    try:
+        with get_checkpointer(cp_type) as checkpointer:
+            graph = build_pipeline(checkpointer=checkpointer)
+            config = {"configurable": {"thread_id": thread_id}}
+            result = graph.invoke(Command(resume=parsed_decision), config=config)
+
+        timing_data = stop_collecting().to_dict() if _DEBUG_MODE else None
+        if "__interrupt__" in result:
+            status = _interrupt_payload(result, timing_data)
+        else:
+            status = _result_response(result, timing_data)
+        _set_resume_status(thread_id, status)
+    except Exception as e:
+        if _DEBUG_MODE:
+            stop_collecting()
+        _set_resume_status(thread_id, {"status": "error", "message": str(e)})
+
+
 def _start_lark_bot_thread() -> threading.Thread | None:
     """Start the Lark WebSocket client in a background daemon thread."""
     from im_copilot.lark_bot import LarkBot
@@ -450,6 +516,7 @@ async def api_chat(request: Request, thread_id: str, message: str = Form(...)):
     from im_copilot.commands import parse_command, execute_command
 
     _require_thread_access(request, thread_id)
+    _clear_resume_status(thread_id)
     user = getattr(request.state, "user", None)
     if user:
         user_session_store.record_session(user["open_id"], thread_id, "web")
@@ -537,88 +604,47 @@ async def api_chat(request: Request, thread_id: str, message: str = Form(...)):
     async with _interrupt_cache_lock:
         _interrupt_cache.pop(thread_id, None)
 
-    response: dict = {
-        "status": "complete",
-        "summary": result.get("summary", ""),
-        "artifacts": result.get("artifacts", {}),
-        "plan": result.get("plan", []),
-        "checks": result.get("checks", []),
-    }
-    if timing_data:
-        response["timing"] = timing_data
-    return JSONResponse(response)
+    return JSONResponse(_result_response(result, timing_data))
 
 
 @app.post("/api/sessions/{thread_id}/resume")
-async def api_resume(request: Request, thread_id: str, decision: str = Form(...)):
+async def api_resume(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    thread_id: str,
+    decision: str = Form(...),
+):
     _require_thread_access(request, thread_id)
     async with _interrupt_cache_lock:
         if thread_id not in _interrupt_cache:
             raise HTTPException(status_code=400, detail="No pending interrupt for this session")
-        gate = _interrupt_cache[thread_id]["gate"]
 
     parsed_decision = json.loads(decision)
 
     cp_type = os.getenv("CHECKPOINTER_TYPE", "sqlite")
-
-    if _DEBUG_MODE:
-        start_collecting()
-
-    with get_checkpointer(cp_type) as checkpointer:
-        graph = build_pipeline(checkpointer=checkpointer)
-        config = {"configurable": {"thread_id": thread_id}}
-
-        try:
-            result = graph.invoke(Command(resume=parsed_decision), config=config)
-        except Exception as e:
-            if _DEBUG_MODE:
-                stop_collecting()
-            raise HTTPException(status_code=500, detail=str(e))
-
-    timing_data = stop_collecting().to_dict() if _DEBUG_MODE else None
-
-    # Handle another interrupt
-    if "__interrupt__" in result:
-        interrupt_data = result["__interrupt__"][0]
-        payload = {
-            "gate": interrupt_data.value["gate"],
-            "message": interrupt_data.value.get("message", ""),
-        }
-        if "plan" in interrupt_data.value:
-            payload["plan"] = interrupt_data.value["plan"]
-        if "questions" in interrupt_data.value:
-            payload["questions"] = interrupt_data.value["questions"]
-        if "intent_type" in interrupt_data.value:
-            payload["intent_type"] = interrupt_data.value["intent_type"]
-        if "intent_params" in interrupt_data.value:
-            payload["intent_params"] = interrupt_data.value["intent_params"]
-
-        async with _interrupt_cache_lock:
-            _interrupt_cache[thread_id] = payload
-        response: dict = {"status": "interrupted", **payload}
-        if timing_data:
-            response["timing"] = timing_data
-        return JSONResponse(response)
-
-    # Complete
-    async with _interrupt_cache_lock:
-        _interrupt_cache.pop(thread_id, None)
-
-    response: dict = {
-        "status": "complete",
-        "summary": result.get("summary", ""),
-        "artifacts": result.get("artifacts", {}),
-        "plan": result.get("plan", []),
-        "checks": result.get("checks", []),
-    }
-    if timing_data:
-        response["timing"] = timing_data
-    return JSONResponse(response)
+    _set_resume_status(thread_id, {"status": "processing"})
+    background_tasks.add_task(_run_resume_background, thread_id, parsed_decision, cp_type)
+    return JSONResponse({"status": "processing"})
 
 
 @app.get("/api/sessions/{thread_id}/status")
 async def api_status(request: Request, thread_id: str):
     _require_thread_access(request, thread_id)
+    resume_status = _get_resume_status(thread_id)
+    if resume_status is not None:
+        if resume_status.get("status") in {"complete", "error"}:
+            _clear_resume_status(thread_id)
+            async with _interrupt_cache_lock:
+                _interrupt_cache.pop(thread_id, None)
+        elif resume_status.get("status") == "interrupted":
+            async with _interrupt_cache_lock:
+                _interrupt_cache[thread_id] = {
+                    key: value
+                    for key, value in resume_status.items()
+                    if key not in {"status", "timing"}
+                }
+        return JSONResponse(resume_status)
+
     async with _interrupt_cache_lock:
         cached = _interrupt_cache.get(thread_id)
     if cached is not None:
