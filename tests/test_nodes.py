@@ -119,9 +119,6 @@ class DeliverNodeTests(unittest.TestCase):
 
     @patch("im_copilot.graph.nodes.deliver_node.get_llm_for_node")
     def test_deliver_artifacts(self, mock_get_llm):
-        mock_llm = MockLLM()
-        mock_llm.invoke.return_value = MagicMock(content="汇总结果")
-        mock_get_llm.return_value = mock_llm
         result = deliver_node(
             {
                 "intent_type": "create_multi",
@@ -134,7 +131,8 @@ class DeliverNodeTests(unittest.TestCase):
                 "raw_message": "测试",
             }
         )
-        self.assertEqual(result["summary"], "汇总结果")
+        mock_get_llm.assert_not_called()
+        self.assertEqual(result["summary"], "已完成。\n- Mock doc：已创建\n- Mock slide：已创建")
 
 
 class VerifyNodeTests(unittest.TestCase):

@@ -11,11 +11,7 @@ from im_copilot.graph.nodes.clarification_node import clarification_node
 from im_copilot.graph.nodes.deliver_node import deliver_node
 from im_copilot.graph.nodes.doc_node import doc_node
 from im_copilot.graph.nodes.intent_node import intent_node
-from im_copilot.graph.nodes.plan_approval_node import plan_approval_node
-from im_copilot.graph.nodes.planner_node import planner_node
 from im_copilot.graph.nodes.slide_node import slide_node
-from im_copilot.graph.nodes.side_agent_node import side_agent_node
-from im_copilot.graph.nodes.verify_node import verify_node
 from im_copilot.graph.nodes.whiteboard_node import whiteboard_node
 from im_copilot.state import PipelineState
 
@@ -162,34 +158,19 @@ class TimedGraph:
         )
 
 
-def route_after_planner(state: PipelineState) -> str:
+def route_after_intent(state: PipelineState) -> str:
     pending = state.get("pending_questions", [])
     if pending:
         return "clarification"
-    if state.get("intent_type") == "chat":
-        return "route_content"
-    return "plan_approval"
-
-
-def route_after_approval(state: PipelineState) -> str:
-    approvals = state.get("approvals", [])
-    if not approvals:
-        return "route_content"
-
-    latest = approvals[-1]
-    if latest.get("status") == "rejected":
-        return "planner"
     return "route_content"
 
 
 def route_content(state: PipelineState) -> str:
     plan = state.get("plan", [])
-    if "doc" in plan:
-        return "doc"
-    if "whiteboard" in plan:
-        return "whiteboard"
-    if "slide" in plan:
-        return "slide"
+    artifacts = state.get("artifacts", {})
+    for step in plan:
+        if step in ("doc", "whiteboard", "slide") and step not in artifacts:
+            return step
     return "deliver"
 
 
@@ -198,109 +179,31 @@ def route_content_node(state: PipelineState) -> dict:
     return {}
 
 
-def fan_out_verify(state: PipelineState) -> list:
-    """Fan out to verify and side_agent in parallel."""
-    from langgraph.types import Send
-
-    return [Send("verify", state), Send("side_agent", state)]
-
-
-def route_after_verify_logic(state: PipelineState) -> str:
-    """Route after verify_node based on the latest check result.
-
-    - pass: continue to next content node or deliver
-    - revise: route back to the same content node (if under max iterations)
-    - clarify: route to deliver (for now; future: clarification node)
-    """
-    checks = state.get("checks", [])
-    if not checks:
-        return "deliver"
-
-    latest = checks[-1]
-    status = latest.get("status", "pass")
-    iteration = state.get("reflection_iteration", 0)
-    max_iterations = 3
-
-    if status == "revise" and iteration < max_iterations:
-        task = latest.get("task", "doc")
-        if task in ("doc", "whiteboard", "slide"):
-            return task
-        return "deliver"
-
-    # pass or clarify or max iterations reached
-    # Find next step in plan after the verified task
-    plan = state.get("plan", [])
-    task = latest.get("task", "")
-    try:
-        idx = plan.index(task)
-        for step in plan[idx + 1 :]:
-            if step in ("doc", "whiteboard", "slide"):
-                return step
-    except ValueError:
-        pass
-    return "deliver"
-
-
-def route_after_verify_node(state: PipelineState) -> dict:
-    """No-op node that routes after verification."""
-    return {}
-
-
 def build_pipeline(checkpointer=None):
     builder = StateGraph(PipelineState)
     builder.add_node("intent", _timed_node("intent", intent_node))
-    builder.add_node("planner", _timed_node("planner", planner_node))
     builder.add_node("clarification", _timed_node("clarification", clarification_node))
-    builder.add_node("plan_approval", _timed_node("plan_approval", plan_approval_node))
     builder.add_node("doc", _timed_node("doc", doc_node))
     builder.add_node("whiteboard", _timed_node("whiteboard", whiteboard_node))
     builder.add_node("slide", _timed_node("slide", slide_node))
-    builder.add_node("verify", _timed_node("verify", verify_node))
-    builder.add_node("side_agent", _timed_node("side_agent", side_agent_node))
     builder.add_node("route_content", _timed_node("route_content", route_content_node))
-    builder.add_node("route_after_verify", _timed_node("route_after_verify", route_after_verify_node))
     builder.add_node("deliver", _timed_node("deliver", deliver_node))
 
     builder.add_edge(START, "intent")
-    builder.add_edge("intent", "planner")
     builder.add_conditional_edges(
-        "planner",
-        route_after_planner,
-        ["clarification", "plan_approval", "route_content"],
+        "intent",
+        route_after_intent,
+        ["clarification", "route_content"],
     )
-    builder.add_edge("clarification", "planner")
-    builder.add_conditional_edges(
-        "plan_approval",
-        route_after_approval,
-        ["route_content", "planner"],
-    )
+    builder.add_edge("clarification", "intent")
     builder.add_conditional_edges(
         "route_content",
         route_content,
         ["doc", "whiteboard", "slide", "deliver"],
     )
-    builder.add_conditional_edges(
-        "doc",
-        fan_out_verify,
-        ["verify", "side_agent"],
-    )
-    builder.add_conditional_edges(
-        "whiteboard",
-        fan_out_verify,
-        ["verify", "side_agent"],
-    )
-    builder.add_conditional_edges(
-        "slide",
-        fan_out_verify,
-        ["verify", "side_agent"],
-    )
-    builder.add_edge("verify", "route_after_verify")
-    builder.add_edge("side_agent", "route_after_verify")
-    builder.add_conditional_edges(
-        "route_after_verify",
-        route_after_verify_logic,
-        ["doc", "whiteboard", "slide", "deliver"],
-    )
+    builder.add_edge("doc", "route_content")
+    builder.add_edge("whiteboard", "route_content")
+    builder.add_edge("slide", "route_content")
     builder.add_edge("deliver", END)
     return TimedGraph(builder.compile(checkpointer=checkpointer))
 
@@ -374,26 +277,15 @@ def draw_mermaid() -> str:
     return """
 graph TD
     START --> intent
-    intent --> planner
-    planner -->|needs clarification| clarification
-    clarification --> planner
-    planner -->|plan ready| plan_approval
-    plan_approval -->|rejected| planner
-    plan_approval -->|approved| route_content
-    route_content -->|plan has doc| doc
-    route_content -->|plan has whiteboard| whiteboard
-    route_content -->|plan has slide| slide
-    route_content -->|chat only| deliver
-    doc --> verify
-    whiteboard --> verify
-    slide --> verify
-    verify -->|pass| route_next
-    verify -->|revise| doc
-    verify -->|revise| whiteboard
-    verify -->|revise| slide
-    verify -->|clarify / max iter| deliver
-    route_next -->|next content| whiteboard
-    route_next -->|next content| slide
-    route_next -->|done| deliver
+    intent -->|needs clarification| clarification
+    clarification --> intent
+    intent -->|ready| route_content
+    route_content -->|next doc| doc
+    route_content -->|next whiteboard| whiteboard
+    route_content -->|next slide| slide
+    doc --> route_content
+    whiteboard --> route_content
+    slide --> route_content
+    route_content -->|done/chat| deliver
     deliver --> END
 """.strip()

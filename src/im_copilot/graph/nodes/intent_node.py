@@ -33,6 +33,9 @@ INTENT_PROMPT = """分析用户的输入消息，判断其意图类型，并制�
 历史对话：
 {history}
 
+历史澄清问答：
+{clarification_history}
+
 用户消息：{message}
 
 请结合历史对话上下文，输出意图类型、主题、置信度、是否需要澄清、澄清问题和执行计划。
@@ -66,7 +69,12 @@ class IntentOutput(BaseModel):
 def intent_node(state: PipelineState) -> dict:
     raw_message = state.get("raw_message", "")
     history = format_history(state.get("message_history", [])[:-1])
-    prompt = INTENT_PROMPT.format(message=raw_message, history=history)
+    clarification_history = _format_clarification_history(state)
+    prompt = INTENT_PROMPT.format(
+        message=raw_message,
+        history=history,
+        clarification_history=clarification_history,
+    )
     llm = get_llm_for_node("intent").with_structured_output(IntentOutput)
     result: IntentOutput = llm.invoke(prompt)
     intent_type = result.intent_type
@@ -108,3 +116,13 @@ _INTENT_TO_PLAN: dict[str, list[str]] = {
 
 def _default_plan(intent_type: str) -> list[str]:
     return list(_INTENT_TO_PLAN.get(intent_type, ["deliver"]))
+
+
+def _format_clarification_history(state: PipelineState) -> str:
+    history = state.get("clarification_history", [])
+    if not history:
+        return "（无历史澄清记录）"
+    return "\n".join(
+        f"Q: {turn['question']}\nA: {turn['answer']}"
+        for turn in history
+    )

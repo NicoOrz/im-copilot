@@ -2,16 +2,6 @@ from im_copilot.graph.nodes.history_utils import format_history
 from im_copilot.llm import get_llm_for_node
 from im_copilot.state import PipelineState
 
-DELIVER_PROMPT = """你是一位智能助手，负责向用户汇总任务执行结果。
-
-用户原始请求：{raw_message}
-意图类型：{intent_type}
-
-执行结果：
-{results}
-
-请生成一段自然、友好的中文回复，向用户说明已完成的工作和关键成果。如果存在错误，请说明并道歉。"""
-
 CHAT_PROMPT = """你是一位友好的智能助手。请回复用户的聊天消息。
 
 历史对话：
@@ -22,6 +12,42 @@ CHAT_PROMPT = """你是一位友好的智能助手。请回复用户的聊天消
 请结合历史对话上下文，给出自然、有帮助的中文回复。"""
 
 
+def _artifact_status_text(status: str) -> str:
+    if status == "created":
+        return "已创建"
+    if status == "draft":
+        return "已生成草稿"
+    if status == "error":
+        return "生成失败"
+    return status or "已生成"
+
+
+def _artifact_summary_lines(plan: list[str], artifacts: dict) -> list[str]:
+    lines: list[str] = []
+    emitted: set[str] = set()
+    ordered_steps = [step for step in plan if step != "deliver"] + [
+        step for step in artifacts.keys() if step not in plan
+    ]
+
+    for step in ordered_steps:
+        if step in emitted:
+            continue
+        emitted.add(step)
+        result = artifacts.get(step)
+        if not isinstance(result, dict):
+            continue
+
+        title = result.get("title") or step
+        url = result.get("url") or ""
+        if url:
+            lines.append(f"- {title}：{url}")
+            continue
+
+        lines.append(f"- {title}：{_artifact_status_text(result.get('status', ''))}")
+
+    return lines
+
+
 def deliver_node(state: PipelineState) -> dict:
     errors = state.get("errors", [])
     if errors:
@@ -29,9 +55,9 @@ def deliver_node(state: PipelineState) -> dict:
 
     intent_type = state.get("intent_type", "chat")
     raw_message = state.get("raw_message", "")
-    llm = get_llm_for_node("deliver")
 
     if intent_type == "chat":
+        llm = get_llm_for_node("deliver")
         history = format_history(state.get("message_history", [])[:-1])
         prompt = CHAT_PROMPT.format(message=raw_message, history=history)
         summary = llm.invoke(prompt).content
@@ -42,30 +68,12 @@ def deliver_node(state: PipelineState) -> dict:
 
     plan = state.get("plan", [])
     artifacts = state.get("artifacts", {})
-    result_lines = []
-    link_lines = []
-
-    for step in plan:
-        if step == "deliver":
-            continue
-        result = artifacts.get(step)
-        if not result:
-            continue
-        result_lines.append(f"【{result['title']}】\n{result.get('preview', '')}")
-        if result.get("url"):
-            status_tag = "（草稿，未上传）" if result.get("status") == "draft" else ""
-            link_lines.append(f"- {result['title']}{status_tag}：{result['url']}")
-
-    results_text = "\n\n".join(result_lines) if result_lines else "无执行结果"
-    prompt = DELIVER_PROMPT.format(
-        raw_message=raw_message,
-        intent_type=intent_type,
-        results=results_text,
-    )
-    summary = llm.invoke(prompt).content
-
-    if link_lines:
-        summary += "\n\n已创建的飞书资源：\n" + "\n".join(link_lines)
+    artifact_lines = _artifact_summary_lines(plan, artifacts)
+    summary = "已完成。"
+    if artifact_lines:
+        summary += "\n" + "\n".join(artifact_lines)
+    else:
+        summary = "已完成处理，但没有生成可交付资源。"
 
     return {
         "summary": summary,
