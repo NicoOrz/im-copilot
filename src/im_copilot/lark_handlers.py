@@ -425,6 +425,17 @@ def _ws_broadcast(open_id: str, data: dict) -> None:
         logger.debug("WS broadcast skipped (no event loop or ws_manager unavailable)")
 
 
+def _ack_message(lark_bot: LarkBot, message_id: str) -> None:
+    if not message_id:
+        return
+    lark_bot.add_reaction(message_id, "OK")
+
+
+def _reply_result(lark_bot: LarkBot, message_id: str, result: Any) -> None:
+    text = result.summary or "处理完成"
+    lark_bot.reply_text(message_id, text)
+
+
 def _process_message(
     text: str,
     chat_id: str,
@@ -566,26 +577,15 @@ def _process_message(
         if result.status == "error":
             lark_bot.reply_text(message_id, f"处理出错：{result.error}")
             return
-        if result.artifacts:
-            logger.info(
-                "lark_message send_result_card chat_id=%s message_id=%s thread_id=%s artifact_keys=%s",
-                chat_id,
-                message_id,
-                thread_id,
-                sorted(result.artifacts.keys()),
-            )
-            state = {"summary": result.summary, "artifacts": result.artifacts}
-            session = {"thread_id": thread_id, "chat_id": chat_id}
-            _finalize_card(lark_bot, session, state)
-        elif result.summary:
-            logger.info(
-                "lark_message reply_summary chat_id=%s message_id=%s thread_id=%s summary_preview=%r",
-                chat_id,
-                message_id,
-                thread_id,
-                result.summary.replace("\n", "\\n")[:200],
-            )
-            lark_bot.reply_text(message_id, result.summary)
+        logger.info(
+            "lark_message reply_result chat_id=%s message_id=%s thread_id=%s artifact_keys=%s summary_preview=%r",
+            chat_id,
+            message_id,
+            thread_id,
+            sorted(result.artifacts.keys()),
+            (result.summary or "").replace("\n", "\\n")[:200],
+        )
+        _reply_result(lark_bot, message_id, result)
         if open_id:
             _ws_broadcast(open_id, {
                 "type": "complete",
@@ -628,6 +628,13 @@ def on_message_receive(data: P2ImMessageReceiveV1, lark_bot: LarkBot) -> None:
     if not chat_id:
         logger.error("Missing chat_id in message event")
         return
+
+    ack_worker = threading.Thread(
+        target=_ack_message,
+        args=(lark_bot, message_id),
+        daemon=True,
+    )
+    ack_worker.start()
 
     worker = threading.Thread(
         target=_process_message,

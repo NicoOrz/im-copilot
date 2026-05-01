@@ -13,9 +13,14 @@ from im_copilot.deep_agent.agent import build_agent
 from im_copilot.deep_agent.doc_agent import (
     generate_doc_content,
 )
-from im_copilot.deep_agent.events import list_events, record_event
+from im_copilot.deep_agent.events import iter_user_messages_for_chat, list_events, record_event
 from im_copilot.llm import get_llm_for_node
-from im_copilot.skills.lark_doc import create_doc_from_content, fetch_doc_content
+from im_copilot.skills.lark_doc import (
+    create_doc_from_content,
+    extract_docx_xml_fields,
+    fetch_doc_content,
+    summarize_docx_xml_content,
+)
 from im_copilot.skills.lark_whiteboard import (
     create_whiteboard_from_mermaid,
     generate_whiteboard_mermaid,
@@ -152,6 +157,7 @@ def run_agent(
                 message=message,
                 thread_id=thread_id,
                 source=source,
+                chat_id=chat_id,
                 user_access_token=user_access_token,
                 route=route,
                 artifacts=artifacts,
@@ -295,6 +301,7 @@ def _run_deterministic_artifacts(
     message: str,
     thread_id: str,
     source: str,
+    chat_id: str,
     user_access_token: str,
     route: RouteDecision,
     artifacts: dict[str, dict[str, Any]],
@@ -303,7 +310,12 @@ def _run_deterministic_artifacts(
     if not steps:
         return None
 
-    linked_doc_context = _fetch_linked_doc_context(message, user_access_token=user_access_token)
+    linked_doc_context = _fetch_linked_doc_context(
+        message,
+        thread_id=thread_id,
+        chat_id=chat_id,
+        user_access_token=user_access_token,
+    )
     for step in steps:
         context = _generation_context(
             thread_id,
@@ -325,6 +337,14 @@ def _run_deterministic_artifacts(
             )
             doc_message = _message_with_context(message, context)
             content = generate_doc_content(doc_message)
+            missing_requirements = _missing_docx_xml_requirements(context, content)
+            if missing_requirements:
+                logger.warning(
+                    "run_agent doc_generator missing_requirements thread_id=%s requirements=%s",
+                    thread_id,
+                    missing_requirements,
+                )
+                content = generate_doc_content(_doc_rewrite_message(doc_message, content, missing_requirements))
             logger.info(
                 "run_agent doc_generator invoke_end thread_id=%s content_len=%s",
                 thread_id,
@@ -499,19 +519,95 @@ def _artifact_steps(route: RouteDecision) -> list[str]:
     return [item for item in order if item in desired]
 
 
-def _fetch_linked_doc_context(message: str, *, user_access_token: str) -> str:
+def _fetch_linked_doc_context(
+    message: str,
+    *,
+    thread_id: str,
+    chat_id: str,
+    user_access_token: str,
+) -> str:
     if not user_access_token:
+        logger.info("linked_doc_context skipped thread_id=%s reason=no_user_token", thread_id)
         return ""
-    refs = _doc_refs_from_message(message)
+    refs = _doc_refs_from_recent_messages(thread_id, chat_id, message)
+    logger.info("linked_doc_context refs thread_id=%s count=%s refs=%s", thread_id, len(refs), refs[:3])
     if not refs:
         return ""
 
-    parts: list[str] = []
-    for ref in refs[:2]:
+    parts: list[str] = [
+        "生成约束：用户聊天中的飞书文档链接候选（生成相关链接时必须优先使用）：\n"
+        + "\n".join(f"- {ref}" for ref in refs[:4])
+    ]
+    fetched_refs: list[dict[str, Any]] = []
+    for ref in refs[:4]:
         content = fetch_doc_content(ref, user_access_token=user_access_token, doc_format="xml")
+        logger.info(
+            "linked_doc_context fetched thread_id=%s ref=%s content_len=%s",
+            thread_id,
+            ref,
+            len(content),
+        )
         if content:
-            parts.append(f"引用文档：{ref}\n{content}")
-    return "\n\n".join(parts)
+            fields = extract_docx_xml_fields(content)
+            summary = summarize_docx_xml_content(content)
+            score = _docx_xml_richness_score(fields)
+            logger.info(
+                "linked_doc_context summarized thread_id=%s ref=%s score=%s summary_len=%s",
+                thread_id,
+                ref,
+                score,
+                len(summary),
+            )
+            fetched_refs.append({
+                "ref": ref,
+                "content": content,
+                "summary": summary,
+                "score": score,
+            })
+    fetched_refs.sort(key=lambda item: int(item["score"]), reverse=True)
+    for item in fetched_refs[:2]:
+        parts.append(
+            f"引用文档：{item['ref']}\n"
+            f"结构化重点（生成时必须优先复用这些字段）：\n{item['summary'] or '未提取到结构化重点'}\n\n"
+            f"原始 DocxXML：\n{item['content']}"
+        )
+    context = "\n\n".join(parts)
+    logger.info("linked_doc_context built thread_id=%s context_len=%s", thread_id, len(context))
+    return context
+
+
+def _doc_refs_from_recent_messages(thread_id: str, chat_id: str, message: str) -> list[str]:
+    refs: list[str] = []
+    for ref in _doc_refs_from_message(message):
+        if ref not in refs:
+            refs.append(ref)
+    for event in reversed(list_events(thread_id)[-12:]):
+        if event.get("event_type") != "user_message":
+            continue
+        text = str(event.get("payload", {}).get("text") or "")
+        for ref in _doc_refs_from_message(text):
+            if ref not in refs:
+                refs.append(ref)
+    if chat_id:
+        since_ts = time.time() - 7 * 24 * 60 * 60
+        for event in reversed(iter_user_messages_for_chat(chat_id, since_ts)[-30:]):
+            text = str(event.get("payload", {}).get("text") or "")
+            for ref in _doc_refs_from_message(text):
+                if ref not in refs:
+                    refs.append(ref)
+    return refs
+
+
+def _docx_xml_richness_score(fields: dict[str, Any]) -> int:
+    return (
+        len(fields.get("cite_users") or []) * 3
+        + len(fields.get("whiteboards") or []) * 6
+        + len(fields.get("images") or []) * 2
+        + len(fields.get("checkboxes") or []) * 2
+        + len(fields.get("links") or []) * 2
+        + len(fields.get("grids") or []) * 5
+        + len(fields.get("headings") or [])
+    )
 
 
 def _doc_refs_from_message(message: str) -> list[str]:
@@ -542,7 +638,41 @@ def _generation_context(
 def _message_with_context(message: str, context: str) -> str:
     if not context.strip():
         return message
-    return f"{message}\n\n参考上下文：\n{context.strip()}"
+    return f"{message}\n\n生成约束上下文（必须遵守）：\n{context.strip()}"
+
+
+def _missing_docx_xml_requirements(context: str, content: str) -> list[str]:
+    if not context.strip():
+        return []
+
+    missing: list[str] = []
+    if _json_array_has_item(context, "cite_users") and "<cite type=\"user\"" not in content:
+        missing.append("缺少 <cite type=\"user\">")
+    if _json_array_has_item(context, "whiteboards") and "<whiteboard" not in content:
+        missing.append("缺少 <whiteboard>")
+    if _json_array_has_item(context, "grids") and "<grid" not in content:
+        missing.append("缺少 <grid>")
+    if _json_array_has_item(context, "checkboxes") and "<checkbox" not in content:
+        missing.append("缺少 <checkbox>")
+    has_links = "飞书文档链接候选" in context or _json_array_has_item(context, "links")
+    has_link_tag = "<a " in content or "<bookmark" in content or "<cite type=\"doc\"" in content
+    if has_links and not has_link_tag:
+        missing.append("缺少链接标签")
+    return missing
+
+
+def _json_array_has_item(text: str, key: str) -> bool:
+    return bool(re.search(rf'"{re.escape(key)}"\s*:\s*\[\s*{{', text))
+
+
+def _doc_rewrite_message(message: str, previous_content: str, missing_requirements: list[str]) -> str:
+    return (
+        f"{message}\n\n"
+        "上一次生成的 DocxXML：\n"
+        f"{previous_content}\n\n"
+        "请重新生成完整 DocxXML，并修正以下缺失项：\n"
+        + "\n".join(f"- {item}" for item in missing_requirements)
+    )
 
 
 def _route_message(message: str, thread_id: str) -> RouteDecision:

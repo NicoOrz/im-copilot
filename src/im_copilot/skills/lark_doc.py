@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
 import logging
+import re
+import xml.etree.ElementTree as ET
 from collections.abc import Mapping
 from typing import Any
 
@@ -156,7 +159,7 @@ def fetch_doc_content(
             "--api-version", "v2",
             "--doc", doc,
             "--doc-format", doc_format,
-            "--detail", "simple",
+            "--detail", "with-ids",
             "--as", "user",
         ], uat=user_access_token)
         content = str(resp.get("data", {}).get("document", {}).get("content") or "")
@@ -165,3 +168,328 @@ def fetch_doc_content(
     except Exception:
         logger.exception("fetch_doc_content failed doc=%r", doc)
         return ""
+
+
+def summarize_docx_xml_content(content: str) -> str:
+    fields = extract_docx_xml_fields(content)
+    if not fields:
+        return ""
+
+    compact_fields = _compact_docx_xml_fields(fields)
+    lines = [
+        "结构化字段 JSON:",
+        json.dumps(compact_fields, ensure_ascii=False, indent=2),
+    ]
+    reuse_requirements = _docx_xml_reuse_requirements(compact_fields)
+    if reuse_requirements:
+        lines.append("生成要求:")
+        lines.extend(f"- {item}" for item in reuse_requirements)
+    if fields["title"]:
+        lines.append(f"title: {fields['title']}")
+    lines.extend(_format_items("headings", fields["headings"]))
+    lines.extend(_format_items("cite_users", fields["cite_users"]))
+    lines.extend(_format_items("whiteboards", fields["whiteboards"]))
+    lines.extend(_format_items("images", fields["images"]))
+    lines.extend(_format_items("checkboxes", fields["checkboxes"]))
+    lines.extend(_format_items("links", fields["links"]))
+    lines.extend(_format_items("grids", fields["grids"]))
+    return "\n".join(lines)
+
+
+def extract_docx_xml_fields(content: str) -> dict[str, Any]:
+    root = _parse_docx_xml(content)
+    if root is None:
+        return _extract_docx_xml_fields_fallback(content)
+
+    parent_by_child = {
+        child: parent
+        for parent in root.iter()
+        for child in list(parent)
+    }
+    fields: dict[str, Any] = {
+        "title": "",
+        "headings": [],
+        "cite_users": [],
+        "whiteboards": [],
+        "images": [],
+        "checkboxes": [],
+        "links": [],
+        "grids": [],
+    }
+
+    for node in root.iter():
+        tag = _tag_name(node.tag)
+        if tag == "title" and not fields["title"]:
+            fields["title"] = _compact_text(node)
+        elif tag in {f"h{i}" for i in range(1, 10)}:
+            fields["headings"].append({
+                "level": tag,
+                "text": _compact_text(node),
+            })
+        elif tag == "cite":
+            cite_type = node.attrib.get("type", "")
+            if cite_type == "user":
+                parent = parent_by_child.get(node)
+                fields["cite_users"].append({
+                    "user_id": node.attrib.get("user-id", ""),
+                    "context": _compact_text(parent) if parent is not None else "",
+                })
+            elif cite_type == "doc":
+                fields["links"].append({
+                    "kind": "doc_cite",
+                    "text": _compact_text(parent_by_child.get(node)),
+                    "doc_id": node.attrib.get("doc-id", ""),
+                })
+        elif tag == "whiteboard":
+            fields["whiteboards"].append({
+                "token": node.attrib.get("token", ""),
+                "type": node.attrib.get("type", ""),
+                "text": _truncate(_compact_text(node), 240),
+            })
+        elif tag == "img":
+            fields["images"].append({
+                "name": node.attrib.get("name", ""),
+                "caption": node.attrib.get("caption", "").strip(),
+                "href": node.attrib.get("href", ""),
+                "src": node.attrib.get("src", ""),
+                "width": node.attrib.get("width", ""),
+                "height": node.attrib.get("height", ""),
+            })
+        elif tag == "checkbox":
+            fields["checkboxes"].append({
+                "done": node.attrib.get("done", "false"),
+                "text": _truncate(_compact_text(node), 260),
+                "user_ids": [
+                    cite.attrib.get("user-id", "")
+                    for cite in node.iter()
+                    if _tag_name(cite.tag) == "cite" and cite.attrib.get("type") == "user"
+                ],
+            })
+        elif tag == "a":
+            fields["links"].append({
+                "kind": "a",
+                "text": _compact_text(node),
+                "href": node.attrib.get("href", ""),
+            })
+        elif tag == "bookmark":
+            fields["links"].append({
+                "kind": "bookmark",
+                "text": node.attrib.get("name", ""),
+                "href": node.attrib.get("href", ""),
+            })
+        elif tag == "grid":
+            fields["grids"].append(_grid_summary(node))
+
+    return fields
+
+
+def _parse_docx_xml(content: str) -> ET.Element | None:
+    if not content.strip():
+        return None
+    try:
+        return ET.fromstring(f"<root>{content}</root>")
+    except ET.ParseError:
+        logger.warning("docx xml parse failed content_len=%s", len(content))
+        return None
+
+
+def _extract_docx_xml_fields_fallback(content: str) -> dict[str, Any]:
+    fields: dict[str, Any] = {
+        "title": _strip_tags(_first_match(r"<title\b[^>]*>(.*?)</title>", content)),
+        "headings": [
+            {"level": level, "text": _strip_tags(text)}
+            for level, text in re.findall(r"<(h[1-9])\b[^>]*>(.*?)</h[1-9]>", content, re.S)
+        ],
+        "cite_users": [
+            {"user_id": user_id, "context": ""}
+            for user_id in re.findall(r"<cite\b[^>]*type=[\"']user[\"'][^>]*user-id=[\"']([^\"']+)[\"'][^>]*/?>", content)
+        ],
+        "whiteboards": [
+            {"token": attrs.get("token", ""), "type": attrs.get("type", ""), "text": ""}
+            for attrs in (_attrs(match) for match in re.findall(r"<whiteboard\b([^>]*)>", content, re.S))
+        ],
+        "images": [
+            {
+                "name": attrs.get("name", ""),
+                "caption": attrs.get("caption", "").strip(),
+                "href": attrs.get("href", ""),
+                "src": attrs.get("src", ""),
+                "width": attrs.get("width", ""),
+                "height": attrs.get("height", ""),
+            }
+            for attrs in (_attrs(match) for match in re.findall(r"<img\b([^>]*)>", content, re.S))
+        ],
+        "checkboxes": [
+            {
+                "done": attrs.get("done", "false"),
+                "text": _truncate(_strip_tags(text), 260),
+                "user_ids": re.findall(r"user-id=[\"']([^\"']+)[\"']", text),
+            }
+            for attrs, text in (
+                (_attrs(attrs), text)
+                for attrs, text in re.findall(r"<checkbox\b([^>]*)>(.*?)</checkbox>", content, re.S)
+            )
+        ],
+        "links": [
+            {"kind": "a", "text": _strip_tags(text), "href": attrs.get("href", "")}
+            for attrs, text in (
+                (_attrs(attrs), text)
+                for attrs, text in re.findall(r"<a\b([^>]*)>(.*?)</a>", content, re.S)
+            )
+        ],
+        "grids": [
+            {"columns": [], "text": _truncate(_strip_tags(text), 400)}
+            for text in re.findall(r"<grid\b[^>]*>(.*?)</grid>", content, re.S)
+        ],
+    }
+    return fields
+
+
+def _first_match(pattern: str, text: str) -> str:
+    match = re.search(pattern, text, re.S)
+    return match.group(1) if match else ""
+
+
+def _attrs(text: str) -> dict[str, str]:
+    return {
+        key: value
+        for key, value in re.findall(r"([\w:-]+)=[\"']([^\"']*)[\"']", text)
+    }
+
+
+def _strip_tags(text: str) -> str:
+    return " ".join(re.sub(r"<[^>]+>", "", text).split())
+
+
+def _tag_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
+
+
+def _compact_text(node: ET.Element | None) -> str:
+    if node is None:
+        return ""
+    return " ".join("".join(node.itertext()).split())
+
+
+def _truncate(text: str, limit: int) -> str:
+    return text if len(text) <= limit else f"{text[:limit]}..."
+
+
+def _grid_summary(node: ET.Element) -> dict[str, Any]:
+    columns = [child for child in list(node) if _tag_name(child.tag) == "column"]
+    return {
+        "columns": [
+            {
+                "width_ratio": column.attrib.get("width-ratio", ""),
+                "text": _truncate(_compact_text(column), 220),
+                "images": [
+                    {
+                        "name": image.attrib.get("name", ""),
+                        "caption": image.attrib.get("caption", "").strip(),
+                        "href": image.attrib.get("href", ""),
+                    }
+                    for image in column.iter()
+                    if _tag_name(image.tag) == "img"
+                ][:4],
+            }
+            for column in columns
+        ],
+    }
+
+
+def _compact_docx_xml_fields(fields: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "title": fields.get("title", ""),
+        "headings": fields.get("headings", [])[:12],
+        "cite_users": [
+            item for item in fields.get("cite_users", [])
+            if item.get("user_id")
+        ][:12],
+        "whiteboards": [
+            item for item in fields.get("whiteboards", [])
+            if item.get("token") or item.get("type") or item.get("text")
+        ][:6],
+        "images": [
+            item for item in fields.get("images", [])
+            if item.get("href") or item.get("src")
+        ][:8],
+        "checkboxes": fields.get("checkboxes", [])[:12],
+        "links": [
+            item for item in fields.get("links", [])
+            if item.get("href") or item.get("doc_id")
+        ][:12],
+        "grids": fields.get("grids", [])[:6],
+    }
+
+
+def _docx_xml_reuse_requirements(fields: dict[str, Any]) -> list[str]:
+    requirements: list[str] = []
+    cite_users = [
+        item.get("user_id", "")
+        for item in fields.get("cite_users", [])
+        if item.get("user_id")
+    ]
+    if cite_users:
+        requirements.append(
+            "参会人和待办负责人必须优先使用 cite_users 中的 user_id 生成 "
+            f"<cite type=\"user\" user-id=\"...\">；可用 user_id: {', '.join(cite_users[:8])}"
+        )
+
+    whiteboards = fields.get("whiteboards", [])
+    if whiteboards:
+        tokens = [
+            item.get("token", "")
+            for item in whiteboards
+            if item.get("token")
+        ]
+        if tokens:
+            requirements.append(
+                "总结区域必须保留至少一个已有白板："
+                f"<whiteboard token=\"{tokens[0]}\"></whiteboard>"
+            )
+        else:
+            requirements.append(
+                "总结区域必须创建一个 <whiteboard type=\"mermaid\">...</whiteboard>。"
+            )
+
+    images = fields.get("images", [])
+    grids = fields.get("grids", [])
+    if grids:
+        requirements.append(
+            "总结区域必须保留至少一个 <grid><column>...</column></grid> 分栏结构。"
+        )
+    if images:
+        reusable = [
+            item.get("href") or item.get("src", "")
+            for item in images
+            if item.get("href") or item.get("src")
+        ]
+        if reusable:
+            requirements.append(
+                "若内容需要配图，必须优先复用 images 中的 href/src，不得编造图片地址；"
+                f"首个可用图片标识: {reusable[0]}"
+            )
+
+    checkboxes = fields.get("checkboxes", [])
+    if checkboxes:
+        requirements.append(
+            "待办区域必须使用 <checkbox done=\"true|false\">，并参考 checkboxes 的完成状态、任务文本和负责人。"
+        )
+
+    links = fields.get("links", [])
+    if links:
+        requirements.append(
+            "相关资源区域必须放入 links 中的 href/doc_id，不得写“未提及相关链接”。"
+        )
+    return requirements
+
+
+def _format_items(label: str, items: list[Any], limit: int = 12) -> list[str]:
+    if not items:
+        return []
+    lines = [f"{label}:"]
+    for item in items[:limit]:
+        lines.append(f"- {item}")
+    if len(items) > limit:
+        lines.append(f"- ... 共 {len(items)} 项")
+    return lines

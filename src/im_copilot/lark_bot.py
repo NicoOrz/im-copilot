@@ -18,8 +18,11 @@ from lark_oapi.api.auth.v3 import (
     InternalTenantAccessTokenRequestBodyBuilder,
 )
 from lark_oapi.api.im.v1 import (
+    CreateMessageReactionRequestBodyBuilder,
+    CreateMessageReactionRequestBuilder,
     CreateMessageRequestBodyBuilder,
     CreateMessageRequestBuilder,
+    EmojiBuilder,
     PatchMessageRequestBodyBuilder,
     PatchMessageRequestBuilder,
     ReplyMessageRequestBodyBuilder,
@@ -246,6 +249,42 @@ class LarkBot:
             return {"code": exc.code, "msg": str(exc), "data": None}
         except Exception as exc:
             logger.exception("reply_text unexpected error: message_id=%s", message_id)
+            return {"code": -1, "msg": str(exc), "data": None}
+
+    def add_reaction(self, message_id: str, emoji_type: str = "OK") -> dict[str, Any]:
+        """Add an emoji reaction to a message."""
+        logger.debug("add_reaction start: message_id=%s emoji_type=%s", message_id, emoji_type)
+        body = (
+            CreateMessageReactionRequestBodyBuilder()
+            .reaction_type(EmojiBuilder().emoji_type(emoji_type).build())
+            .build()
+        )
+        req = (
+            CreateMessageReactionRequestBuilder()
+            .message_id(message_id)
+            .request_body(body)
+            .build()
+        )
+
+        try:
+            resp = self._client.im.v1.message_reaction.create(req)
+            result = self._unwrap_response(resp)
+            if not resp.success():
+                logger.error(
+                    "add_reaction failed: code=%s msg=%s message_id=%s emoji_type=%s",
+                    resp.code,
+                    resp.msg,
+                    message_id,
+                    emoji_type,
+                )
+            else:
+                logger.info("add_reaction success: message_id=%s emoji_type=%s", message_id, emoji_type)
+            return result
+        except ObtainAccessTokenException as exc:
+            logger.error("add_reaction auth error: %s", exc)
+            return {"code": exc.code, "msg": str(exc), "data": None}
+        except Exception as exc:
+            logger.exception("add_reaction unexpected error: message_id=%s", message_id)
             return {"code": -1, "msg": str(exc), "data": None}
 
     def send_card(self, chat_id: str, card_json: dict[str, Any]) -> dict[str, Any]:
