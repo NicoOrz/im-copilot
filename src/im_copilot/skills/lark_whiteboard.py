@@ -35,6 +35,30 @@ WHITEBOARD_PROMPT = """{system_prompt}
 - 节点文字使用中文，简洁清晰
 """
 
+WHITEBOARD_MERMAID_PROMPT = """你是飞书白板 Mermaid 内容生成器。只输出纯 Mermaid 代码。
+
+上下文：
+{context}
+
+用户请求：
+{message}
+
+吸收的 lark-whiteboard 规则：
+- 不靠关键词猜图形，先判断信息结构：层级/结构用 mindmap，极简流程用 flowchart，交互过程用 sequenceDiagram，状态迁移用 stateDiagram-v2，比例分布用 pie，时间排期用 gantt。
+- 思维导图适合会议纪要、主题拆解、结构化总结。
+- 流程图只用于简单文字流程；步骤数超过 12 时要合并步骤，节点文字尽量不超过 8 字。
+- 判断节点只写条件关键词，不写长描述。
+- 节点文字使用中文，简洁清晰，避免长句和大段文字。
+- 只输出 Mermaid 文本，不输出 Markdown 代码块。
+
+输出要求：
+- 如果用户要求思维导图或内容是会议总结，优先输出 mindmap。
+- 如果用户要求流程、链路、架构流程，输出 flowchart TD 或 LR。
+- 如果用户要求角色交互、请求响应、会议对话流，输出 sequenceDiagram。
+- 如果用户要求状态变化，输出 stateDiagram-v2。
+- 内容必须忠实反映上下文中的事实，不添加无依据信息。
+"""
+
 
 def create(state: Mapping[str, Any]) -> SkillArtifact:
     topic = state.get("intent_params", {}).get("topic", "未命名白板")
@@ -130,23 +154,13 @@ def create_whiteboard_from_mermaid(
 
 
 def generate_whiteboard_mermaid(message: str, *, context: str = "") -> str:
-    prompt = f"""你是白板内容生成器。请根据用户请求和上下文生成 Mermaid 思维导图或流程图。
-
-上下文：
-{context or "（无）"}
-
-用户请求：
-{message}
-
-要求：
-- 只输出 Mermaid 代码
-- 不要输出代码块标记
-- 优先使用 mindmap 表达思维导图需求
-- 忠实反映上下文中的关键信息和结构关系
-- 节点文字使用中文，简洁清晰
-"""
+    prompt = WHITEBOARD_MERMAID_PROMPT.format(
+        context=(context or "（无）")[:9000],
+        message=message,
+    )
     content = get_llm_for_node("whiteboard").invoke(prompt).content
-    return _strip_code_fence(_content_to_text(content)).strip()
+    mermaid = _strip_code_fence(_content_to_text(content)).strip()
+    return _clean_mermaid(mermaid)
 
 
 def _append_whiteboard_to_doc(
@@ -234,6 +248,40 @@ def _strip_code_fence(text: str) -> str:
     if lines and lines[-1].strip() == "```":
         lines = lines[:-1]
     return "\n".join(lines).strip()
+
+
+def _clean_mermaid(text: str) -> str:
+    lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return "mindmap\n  root((主题))\n    要点\n"
+    first = lines[0].strip()
+    valid_prefixes = (
+        "mindmap",
+        "flowchart",
+        "graph",
+        "sequenceDiagram",
+        "stateDiagram",
+        "classDiagram",
+        "pie",
+        "gantt",
+        "erDiagram",
+        "gitGraph",
+    )
+    if first.startswith(valid_prefixes):
+        return "\n".join(lines).strip()
+    for index, line in enumerate(lines):
+        if line.strip().startswith(valid_prefixes):
+            return "\n".join(lines[index:]).strip()
+    title = _short_node_text(first)
+    children = [_short_node_text(line) for line in lines[1:8]]
+    child_text = "\n".join(f"    {child}" for child in children if child)
+    return f"mindmap\n  root(({title or '主题'}))\n{child_text or '    要点'}"
+
+
+def _short_node_text(text: str, limit: int = 16) -> str:
+    cleaned = re.sub(r"[`*_#>\[\]{}()]+", "", text).strip()
+    cleaned = re.sub(r"\s+", "", cleaned)
+    return cleaned[:limit]
 
 
 def _whiteboard_token(document: dict[str, Any]) -> str:
