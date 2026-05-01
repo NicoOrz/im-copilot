@@ -4,6 +4,7 @@ import os
 
 from im_copilot.graph.nodes.history_utils import format_history
 from im_copilot.llm import get_llm_for_node
+from im_copilot.skills.registry import planner_capability_text
 from im_copilot.state import PipelineState
 
 _CLARIFICATION_THRESHOLD = float(os.getenv("CLARIFICATION_CONFIDENCE_THRESHOLD", "0.7"))
@@ -22,6 +23,9 @@ PLANNER_PROMPT = """根据用户的意图类型和主题，制定一个执行计
 - whiteboard: 生成白板/流程图内容
 - slide: 生成PPT内容
 - deliver: 汇总结果并交付给用户
+
+runtime skills：
+{runtime_skills}
 
 规则：
 1. 计划必须按顺序排列
@@ -91,6 +95,7 @@ def planner_node(state: PipelineState) -> dict:
         raw_message=state.get("raw_message", ""),
         message_history=format_history(state.get("message_history", [])[:-1]),
         clarification_history=history_text,
+        runtime_skills=planner_capability_text(),
     )
     result: PlannerOutput = get_llm_for_node("planner").with_structured_output(PlannerOutput).invoke(prompt)
 

@@ -9,6 +9,8 @@ from im_copilot.graph.nodes.slide_node import slide_node
 from im_copilot.graph.nodes.side_agent_node import side_agent_node
 from im_copilot.graph.nodes.verify_node import verify_node
 from im_copilot.graph.nodes.whiteboard_node import whiteboard_node
+from im_copilot.skills.config import get_skill_config
+from im_copilot.skills.registry import get_skill, planner_capability_text
 
 
 class MockLLM:
@@ -119,34 +121,120 @@ class PlannerNodeTests(unittest.TestCase):
         self.assertEqual(result["plan"], [])
         self.assertEqual(result["pending_questions"], ["目标受众是谁？", "需要什么格式？"])
 
+    @patch("im_copilot.graph.nodes.planner_node.get_llm_for_node")
+    def test_planner_prompt_uses_registry_capabilities(self, mock_get_llm):
+        mock_llm = MockLLM()
+        mock_llm.invoke.return_value = MagicMock(
+            plan=["deliver"],
+            needs_clarification=False,
+            questions=[],
+        )
+        mock_get_llm.return_value = mock_llm
+        planner_node({"intent_type": "chat"})
+        prompt = mock_llm.invoke.call_args.args[0]
+        self.assertIn("lark_doc.create", prompt)
+        self.assertIn("lark_whiteboard.create", prompt)
+        self.assertIn("lark_slide.create", prompt)
+
+
+class SkillRegistryTests(unittest.TestCase):
+    def test_registry_has_create_skills(self):
+        self.assertEqual(get_skill("lark_doc.create").plan_step, "doc")
+        self.assertEqual(get_skill("lark_whiteboard.create").plan_step, "whiteboard")
+        self.assertEqual(get_skill("lark_slide.create").plan_step, "slide")
+
+    def test_planner_capability_text_from_registry(self):
+        text = planner_capability_text()
+        self.assertIn("lark_doc.create", text)
+        self.assertIn("lark_whiteboard.create", text)
+        self.assertIn("lark_slide.create", text)
+
+    def test_skill_config_uses_defaults(self):
+        self.assertIn("system_prompt", get_skill_config("lark_doc"))
+
 
 class MockNodeTests(unittest.TestCase):
-    @patch("im_copilot.graph.nodes.doc_node.get_llm_for_node")
-    def test_doc_node_adds_doc_result(self, mock_get_llm):
+    @patch("im_copilot.skills.lark_doc.run_lark_cli")
+    @patch("im_copilot.skills.lark_doc.get_llm_for_node")
+    def test_doc_node_adds_doc_result(self, mock_get_llm, mock_run_cli):
         mock_llm = MockLLM()
         mock_llm.invoke.return_value = MagicMock(content="文档内容")
         mock_get_llm.return_value = mock_llm
-        result = doc_node({"artifacts": {}, "intent_params": {"topic": "测试"}})
+        mock_run_cli.return_value = {
+            "data": {"document": {"document_id": "doc123", "url": "https://x/doc123"}}
+        }
+        result = doc_node({"artifacts": {}, "intent_params": {"topic": "测试"}, "user_access_token": "uat"})
         self.assertEqual(result["artifacts"]["doc"]["kind"], "doc")
         self.assertEqual(result["artifacts"]["doc"]["status"], "created")
         self.assertEqual(result["artifacts"]["doc"]["preview"], "文档内容")
 
-    @patch("im_copilot.graph.nodes.whiteboard_node.get_llm_for_node")
-    def test_whiteboard_node_preserves_existing_results(self, mock_get_llm):
+    @patch("im_copilot.skills.lark_whiteboard.run_lark_cli")
+    @patch("im_copilot.skills.lark_whiteboard.get_llm_for_node")
+    def test_whiteboard_node_preserves_existing_results(self, mock_get_llm, mock_run_cli):
         mock_llm = MockLLM()
         mock_llm.invoke.return_value = MagicMock(content="白板内容")
         mock_get_llm.return_value = mock_llm
-        result = whiteboard_node({"artifacts": {"doc": {"kind": "doc", "title": "x", "status": "created", "preview": "x"}}, "intent_params": {"topic": "测试"}})
+        mock_run_cli.side_effect = [
+            {
+                "data": {
+                    "document": {
+                        "document_id": "doc123",
+                        "url": "https://x/doc123",
+                        "new_blocks": [
+                            {"block_type": "whiteboard", "block_token": "wb123"}
+                        ],
+                    }
+                }
+            },
+            {"ok": True},
+        ]
+        result = whiteboard_node({
+            "artifacts": {"doc": {"kind": "doc", "title": "x", "status": "created", "preview": "x"}},
+            "intent_params": {"topic": "测试"},
+            "user_access_token": "uat",
+        })
         self.assertIn("doc", result["artifacts"])
         self.assertEqual(result["artifacts"]["whiteboard"]["kind"], "whiteboard")
+        self.assertEqual(result["artifacts"]["whiteboard"]["status"], "created")
 
-    @patch("im_copilot.graph.nodes.slide_node.get_llm_for_node")
-    def test_slide_node_adds_slide_result(self, mock_get_llm):
+    @patch("im_copilot.skills.lark_slide.run_lark_cli")
+    @patch("im_copilot.skills.lark_slide.get_llm_for_node")
+    def test_slide_node_adds_slide_result(self, mock_get_llm, mock_run_cli):
         mock_llm = MockLLM()
-        mock_llm.invoke.return_value = MagicMock(content="PPT内容")
+        mock_llm.invoke.return_value = MagicMock(content='["<slide xmlns=\\"http://www.larkoffice.com/sml/2.0\\"><data></data></slide>"]')
         mock_get_llm.return_value = mock_llm
-        result = slide_node({"artifacts": {}, "intent_params": {"topic": "测试"}})
+        mock_run_cli.return_value = {"data": {"xml_presentation_id": "ppt123", "url": "https://x/ppt123"}}
+        result = slide_node({"artifacts": {}, "intent_params": {"topic": "测试"}, "user_access_token": "uat"})
         self.assertEqual(result["artifacts"]["slide"]["kind"], "slide")
+        self.assertEqual(result["artifacts"]["slide"]["status"], "created")
+
+    @patch("im_copilot.skills.lark_doc.run_lark_cli")
+    @patch("im_copilot.skills.lark_doc.get_llm_for_node")
+    def test_doc_node_returns_draft_without_token(self, mock_get_llm, mock_run_cli):
+        mock_llm = MockLLM()
+        mock_llm.invoke.return_value = MagicMock(content="文档内容")
+        mock_get_llm.return_value = mock_llm
+        mock_run_cli.return_value = {"data": {"document": {}}}
+        result = doc_node({"artifacts": {}, "intent_params": {"topic": "测试"}, "user_access_token": "uat"})
+        self.assertEqual(result["artifacts"]["doc"]["status"], "draft")
+
+    @patch("im_copilot.skills.lark_whiteboard.get_llm_for_node")
+    def test_whiteboard_node_returns_draft_without_user_token(self, mock_get_llm):
+        mock_llm = MockLLM()
+        mock_llm.invoke.return_value = MagicMock(content="graph TD\nA-->B")
+        mock_get_llm.return_value = mock_llm
+        result = whiteboard_node({"artifacts": {}, "intent_params": {"topic": "测试"}})
+        self.assertEqual(result["artifacts"]["whiteboard"]["status"], "draft")
+
+    @patch("im_copilot.skills.lark_slide.run_lark_cli")
+    @patch("im_copilot.skills.lark_slide.get_llm_for_node")
+    def test_slide_node_returns_draft_on_cli_exception(self, mock_get_llm, mock_run_cli):
+        mock_llm = MockLLM()
+        mock_llm.invoke.return_value = MagicMock(content='["<slide xmlns=\\"http://www.larkoffice.com/sml/2.0\\"><data></data></slide>"]')
+        mock_get_llm.return_value = mock_llm
+        mock_run_cli.side_effect = RuntimeError("failed")
+        result = slide_node({"artifacts": {}, "intent_params": {"topic": "测试"}, "user_access_token": "uat"})
+        self.assertEqual(result["artifacts"]["slide"]["status"], "draft")
 
 
 class DeliverNodeTests(unittest.TestCase):

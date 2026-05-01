@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, time as dt_time, timedelta
 from zoneinfo import ZoneInfo
 
-from im_copilot.memory.events import iter_user_messages_for_chat
+from im_copilot.deep_agent.events import iter_user_messages_for_chat
 from im_copilot.memory.todo_store import todo_store
 
 _TZ = ZoneInfo("Asia/Hong_Kong")

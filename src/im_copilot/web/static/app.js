@@ -612,6 +612,8 @@ function showArtifacts(artifacts) {
     const artifactHtml = Object.entries(artifacts).map(([key, artifact]) => `
         <div class="artifact-card">
             <h4>${escapeHtml(artifact.title || key)} (${escapeHtml(artifact.kind || '')})</h4>
+            ${artifact.status ? `<p>${escapeHtml(artifact.status)}</p>` : ''}
+            ${artifact.url ? `<p><a href="${escapeHtml(artifact.url)}" target="_blank" rel="noopener">打开产物</a></p>` : ''}
             <pre>${escapeHtml(artifact.preview || '')}</pre>
         </div>
     `).join('');

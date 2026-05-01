@@ -1,7 +1,13 @@
 """Event handlers for Feishu (Lark) bot WebSocket events.
 
 This module wires incoming messages and card actions into the LangGraph
-pipeline. New message handling replies with plain text.
+pipeline, manages interactive cards, and handles HITL interrupts via the
+session manager.
+
+Interaction design:
+- All intents use a streaming card for LLM output (typing effect)
+- Non-chat intents show progress steps then approval cards
+- Chat intents stream the reply directly in the card
 """
 
 from __future__ import annotations
@@ -13,7 +19,6 @@ import re
 import sqlite3
 import threading
 import time
-import uuid
 from functools import partial
 from typing import Any
 
@@ -28,8 +33,8 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
     P2CardActionTriggerResponse,
 )
 
-from im_copilot.checkpointer import get_checkpointer
-from im_copilot.graph.pipeline import build_pipeline
+from im_copilot.deep_agent.events import record_event
+from im_copilot.deep_agent.service import run_agent
 from im_copilot.lark_bot import LarkBot
 from im_copilot.lark_card import (
     create_approval_card,
@@ -38,7 +43,6 @@ from im_copilot.lark_card import (
     create_result_card,
     create_streaming_card,
 )
-from im_copilot.memory.events import record_event
 from im_copilot.session_manager import session_manager
 from im_copilot.user_session_store import session_store as user_session_store
 from im_copilot.user_token_store import token_store
@@ -109,12 +113,32 @@ def _mark_message_processing(message_id: str) -> bool:
 
 
 def _extract_text_content(content: str) -> str:
-    """Parse the JSON content string from a Feishu text message."""
+    """Parse the JSON content string from a Feishu text or rich-text message."""
     try:
         parsed = json.loads(content)
-        return parsed.get("text", "")
     except json.JSONDecodeError:
         return content
+    if isinstance(parsed, dict):
+        text = parsed.get("text")
+        if isinstance(text, str) and text.strip():
+            return text
+        return _extract_rich_text(parsed.get("content")).strip()
+    return ""
+
+
+def _extract_rich_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return "".join(_extract_rich_text(item) for item in value)
+    if isinstance(value, dict):
+        parts = []
+        for key in ("text", "name", "href", "content"):
+            item = value.get(key)
+            if isinstance(item, (str, list, dict)):
+                parts.append(_extract_rich_text(item))
+        return "".join(parts)
+    return ""
 
 
 def _make_thread_id(chat_id: str, message_id: str | None = None) -> str:
@@ -330,23 +354,19 @@ def _finalize_card(
     )
 
     artifacts_plain: dict[str, str] = {}
+    doc_links: list[dict] = []
     for k, v in artifacts.items():
         if isinstance(v, dict):
             artifacts_plain[k] = f"{v.get('title', k)} — {v.get('status', 'unknown')}"
+            if v.get("url"):
+                doc_links.append({"title": v.get("title", k), "url": v["url"]})
         else:
             artifacts_plain[k] = str(v)
-
-    doc_links: list[dict] | None = None
-    if artifacts_plain:
-        doc_links = [
-            {"title": info, "url": "#"}
-            for info in artifacts_plain.values()
-        ]
 
     card = create_result_card(
         summary=summary,
         artifacts=artifacts_plain,
-        doc_links=doc_links,
+        doc_links=doc_links or None,
     )
     if card_message_id:
         logger.debug("Finalize patch existing card: message_id=%s", card_message_id)
@@ -425,9 +445,28 @@ def _process_message(
     is_command = parse_command(clean_text) is not None
     is_mentioned = _mentions_bot(text, mentions)
     is_bot_message = sender_type.lower() == "bot"
+    logger.info(
+        "lark_message route_check chat_id=%s message_id=%s chat_type=%s text_len=%s clean_len=%s is_group=%s is_command=%s is_mentioned=%s is_bot_message=%s open_id=%s",
+        chat_id,
+        message_id,
+        chat_type,
+        len(text),
+        len(clean_text),
+        is_group,
+        is_command,
+        is_mentioned,
+        is_bot_message,
+        open_id,
+    )
 
     if is_group and not is_command and not is_mentioned:
         if not is_bot_message:
+            logger.info(
+                "lark_message group_memory_only chat_id=%s message_id=%s open_id=%s",
+                chat_id,
+                message_id,
+                open_id,
+            )
             record_event(
                 chat_id,
                 "feishu",
@@ -453,6 +492,14 @@ def _process_message(
     if parsed is not None:
         cmd_name, cmd_args = parsed
         thread_id = _make_thread_id(chat_id)
+        logger.info(
+            "lark_message command chat_id=%s message_id=%s thread_id=%s command=%s args_len=%s",
+            chat_id,
+            message_id,
+            thread_id,
+            cmd_name,
+            len(cmd_args),
+        )
         cmd_result = execute_command(cmd_name, cmd_args, chat_id, thread_id, source="feishu", user_id=open_id)
         if cmd_result.metadata.get("action") == "reset_thread":
             _reset_chat_thread(chat_id)
@@ -461,7 +508,14 @@ def _process_message(
 
     thread_id = _make_thread_id(chat_id)
     source = "feishu"
-    logger.debug("Process message start: thread_id=%s message_id=%s text_len=%s", thread_id, message_id, len(text))
+    logger.info(
+        "lark_message agent_start chat_id=%s message_id=%s thread_id=%s open_id=%s text_len=%s",
+        chat_id,
+        message_id,
+        thread_id,
+        open_id,
+        len(text),
+    )
 
     if open_id:
         user_session_store.record_session(open_id, thread_id, "feishu", chat_id=chat_id)
@@ -472,142 +526,76 @@ def _process_message(
     if open_id:
         user_access_token = token_store.get(open_id) or ""
         if not user_access_token:
+            logger.info(
+                "lark_message oauth_required chat_id=%s message_id=%s thread_id=%s open_id=%s",
+                chat_id,
+                message_id,
+                thread_id,
+                open_id,
+            )
             _send_oauth_prompt(lark_bot, chat_id, open_id)
             return
+    logger.info(
+        "lark_message oauth_status chat_id=%s message_id=%s thread_id=%s has_user_token=%s",
+        chat_id,
+        message_id,
+        thread_id,
+        bool(user_access_token),
+    )
 
-    active_session = session_manager.get_session(thread_id)
-    if active_session is not None:
-        _resume_text_session(
+    try:
+        result = run_agent(
+            text,
             thread_id=thread_id,
-            text=clean_text,
+            source=source,
+            chat_id=chat_id,
             message_id=message_id,
-            lark_bot=lark_bot,
-            open_id=open_id,
+            user_id=open_id,
+            user_access_token=user_access_token,
         )
-        return
-
-    try:
-        with get_checkpointer("sqlite") as checkpointer:
-            logger.debug("Checkpointer opened: thread_id=%s", thread_id)
-            graph = build_pipeline(checkpointer=checkpointer)
-            logger.debug("Pipeline built: thread_id=%s", thread_id)
-            config = {"configurable": {"thread_id": thread_id}}
-            initial_state = {
-                "raw_message": text,
-                "chat_id": chat_id,
-                "message_id": message_id,
-                "source": source,
-                "user_id": open_id,
-                "user_access_token": user_access_token,
-                "message_history": [{"role": "user", "content": text}],
-                "errors": [],
-                "checks": [],
-                "reflection_iteration": 0,
-            }
-
-            logger.debug("Graph invoke start: thread_id=%s", thread_id)
-            final_state = graph.invoke(initial_state, config=config)
-            if "__interrupt__" in final_state:
-                interrupt_info = _get_interrupt_info(final_state)
-                if interrupt_info:
-                    session_manager.create_session(
-                        thread_id=thread_id,
-                        graph=graph,
-                        config=config,
-                        chat_id=chat_id,
-                        open_id=open_id,
-                    )
-                    session_manager.update_session(
-                        thread_id,
-                        last_interrupt=interrupt_info,
-                    )
-                    questions = interrupt_info.get("questions", [])
-                    if questions:
-                        lark_bot.reply_text(message_id, "需要确认：\n" + "\n".join(f"- {q}" for q in questions))
-                    else:
-                        lark_bot.reply_text(message_id, interrupt_info.get("message", "需要更多信息。"))
-                logger.debug("Process message paused: thread_id=%s message_id=%s", thread_id, message_id)
-                return
-
-            summary = final_state.get("summary", "")
-            logger.debug(
-                "Graph invoke finished: thread_id=%s message_id=%s intent=%s summary_len=%s artifact_count=%s",
-                thread_id,
-                message_id,
-                final_state.get("intent_type", ""),
-                len(summary),
-                len(final_state.get("artifacts", {})),
-            )
-            if summary:
-                lark_bot.reply_text(message_id, summary)
-            if open_id:
-                _ws_broadcast(open_id, {
-                    "type": "complete",
-                    "thread_id": thread_id,
-                    "data": {"summary": summary, "artifacts": final_state.get("artifacts", {})},
-                })
-            session_manager.delete_session(thread_id)
-            logger.debug("Process message done: thread_id=%s message_id=%s", thread_id, message_id)
-
-    except Exception as exc:
-        logger.exception("Pipeline error for thread_id=%s", thread_id)
-        lark_bot.send_text(chat_id, f"处理出错：{exc}")
-        session_manager.delete_session(thread_id)
-
-
-def _resume_text_session(
-    *,
-    thread_id: str,
-    text: str,
-    message_id: str,
-    lark_bot: LarkBot,
-    open_id: str = "",
-) -> None:
-    from langgraph.types import Command
-
-    session = session_manager.get_session(thread_id)
-    if session is None:
-        lark_bot.reply_text(message_id, "当前没有待处理的问题。")
-        return
-
-    config = session["config"]
-    last_interrupt = session.get("last_interrupt") or {}
-    questions = last_interrupt.get("questions") or []
-    decision: str | list[str] = text
-    if len(questions) > 1:
-        answers = [line.strip() for line in text.splitlines() if line.strip()]
-        decision = answers or [text]
-
-    try:
-        with get_checkpointer("sqlite") as checkpointer:
-            graph = build_pipeline(checkpointer=checkpointer)
-            result = graph.invoke(Command(resume=decision), config=config)
-
-        if "__interrupt__" in result:
-            interrupt_info = _get_interrupt_info(result)
-            if interrupt_info:
-                session_manager.update_session(thread_id, last_interrupt=interrupt_info)
-                next_questions = interrupt_info.get("questions", [])
-                if next_questions:
-                    lark_bot.reply_text(message_id, "需要确认：\n" + "\n".join(f"- {q}" for q in next_questions))
-                else:
-                    lark_bot.reply_text(message_id, interrupt_info.get("message", "需要更多信息。"))
+        logger.info(
+            "lark_message agent_result chat_id=%s message_id=%s thread_id=%s status=%s summary_len=%s artifact_keys=%s error_len=%s",
+            chat_id,
+            message_id,
+            thread_id,
+            result.status,
+            len(result.summary or ""),
+            sorted(result.artifacts.keys()),
+            len(result.error or ""),
+        )
+        if result.status == "error":
+            lark_bot.reply_text(message_id, f"处理出错：{result.error}")
             return
-
-        summary = result.get("summary", "")
-        if summary:
-            lark_bot.reply_text(message_id, summary)
+        if result.artifacts:
+            logger.info(
+                "lark_message send_result_card chat_id=%s message_id=%s thread_id=%s artifact_keys=%s",
+                chat_id,
+                message_id,
+                thread_id,
+                sorted(result.artifacts.keys()),
+            )
+            state = {"summary": result.summary, "artifacts": result.artifacts}
+            session = {"thread_id": thread_id, "chat_id": chat_id}
+            _finalize_card(lark_bot, session, state)
+        elif result.summary:
+            logger.info(
+                "lark_message reply_summary chat_id=%s message_id=%s thread_id=%s summary_preview=%r",
+                chat_id,
+                message_id,
+                thread_id,
+                result.summary.replace("\n", "\\n")[:200],
+            )
+            lark_bot.reply_text(message_id, result.summary)
         if open_id:
             _ws_broadcast(open_id, {
                 "type": "complete",
                 "thread_id": thread_id,
-                "data": {"summary": summary, "artifacts": result.get("artifacts", {})},
+                "data": {"summary": result.summary, "artifacts": result.artifacts},
             })
-        session_manager.delete_session(thread_id)
+
     except Exception as exc:
-        logger.exception("Resume text error for thread_id=%s", thread_id)
-        chat_id = session.get("chat_id", thread_id)
-        lark_bot.send_text(chat_id, f"继续处理时出错：{exc}")
+        logger.exception("Pipeline error for thread_id=%s", thread_id)
+        lark_bot.send_text(chat_id, f"处理出错：{exc}")
         session_manager.delete_session(thread_id)
 
 
@@ -656,64 +644,11 @@ def _resume_card_action(
     decision: Any,
     lark_bot: LarkBot,
 ) -> None:
-    logger.debug("Resume worker start: thread_id=%s decision=%s", thread_id, decision)
-    session: dict[str, Any] | None = None
-    try:
-        session = session_manager.get_session(thread_id)
-        if session is None:
-            logger.warning("No active session for resume: thread_id=%s", thread_id)
-            return
-
-        config = session["config"]
-
-        from langgraph.types import Command
-
-        with get_checkpointer("sqlite") as checkpointer:
-            graph = build_pipeline(checkpointer=checkpointer)
-            logger.debug("Resume stream start: thread_id=%s", thread_id)
-            stream = graph.stream(
-                Command(resume=decision), config=config, stream_mode="updates",
-            )
-            final_state: dict[str, Any] = {}
-
-            for step in stream:
-                logger.debug("Resume stream step: thread_id=%s keys=%s", thread_id, list(step.keys()))
-                if _is_interrupt_update(step):
-                    interrupt_info = _get_interrupt_info(step)
-                    if interrupt_info:
-                        session_manager.update_session(
-                            thread_id,
-                            last_interrupt=interrupt_info,
-                        )
-                        _update_card_for_interrupt(lark_bot, session, interrupt_info)
-                    return
-
-                for node_name, update in step.items():
-                    if isinstance(update, dict):
-                        final_state.update(update)
-                    detail = f"节点 {node_name} 执行中..."
-                    _update_progress_card(lark_bot, session, node_name, detail)
-
-            logger.debug("Resume stream finished: thread_id=%s final_keys=%s", thread_id, list(final_state.keys()))
-            _finalize_card(lark_bot, session, final_state)
-            open_id = session.get("open_id", "") if session else ""
-            if open_id:
-                _ws_broadcast(open_id, {
-                    "type": "complete",
-                    "thread_id": thread_id,
-                    "data": {
-                        "summary": final_state.get("summary", ""),
-                        "artifacts": final_state.get("artifacts", {}),
-                    },
-                })
-            session_manager.delete_session(thread_id)
-            logger.debug("Resume worker done: thread_id=%s", thread_id)
-
-    except Exception as exc:
-        logger.exception("Resume error for thread_id=%s", thread_id)
-        chat_id = session.get("chat_id", thread_id) if session else thread_id
-        lark_bot.send_text(chat_id, f"继续处理时出错：{exc}")
-        session_manager.delete_session(thread_id)
+    logger.debug("Resume ignored: thread_id=%s decision=%s", thread_id, decision)
+    session = session_manager.get_session(thread_id)
+    chat_id = session.get("chat_id", thread_id) if session else thread_id
+    lark_bot.send_text(chat_id, "当前无待处理任务。")
+    session_manager.delete_session(thread_id)
 
 
 def on_card_action(

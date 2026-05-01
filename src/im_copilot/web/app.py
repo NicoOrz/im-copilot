@@ -1,7 +1,6 @@
 import asyncio
 import json
 import os
-import sqlite3
 import threading
 import uuid
 from contextlib import asynccontextmanager
@@ -11,15 +10,12 @@ from fastapi import BackgroundTasks, FastAPI, Form, HTTPException, Request, WebS
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from langgraph.types import Command
 from starlette.middleware.sessions import SessionMiddleware
 
 import lark_oapi as lark
 
-from im_copilot.checkpointer import get_checkpointer
-from im_copilot.graph.pipeline import build_pipeline
-from im_copilot.state import PipelineState
-from im_copilot.timing import start_collecting, stop_collecting
+from im_copilot.deep_agent.events import delete_thread, history_for_thread, list_threads
+from im_copilot.deep_agent.service import run_agent
 from im_copilot.user_session_store import session_store as user_session_store
 from im_copilot.user_token_store import token_store
 from im_copilot.web.auth import get_current_user, is_login_exempt, login_redirect_url
@@ -32,222 +28,19 @@ _interrupt_cache_lock = asyncio.Lock()
 _resume_status_cache: dict[str, dict] = {}
 _resume_status_lock = threading.Lock()
 
-# Checkpointer DB path (same as checkpointer.py default)
-DB_PATH = os.getenv("CHECKPOINTER_DB", ".copilot_checkpoints.sqlite")
-
 _DEBUG_MODE = os.getenv("IM_COPILOT_DEBUG") == "1"
 
 
-def _get_db_connection() -> sqlite3.Connection:
-    return sqlite3.connect(DB_PATH)
-
-
 def _list_sessions() -> list[dict]:
-    """Query the SQLite checkpointer for distinct thread_ids."""
-    if not os.path.exists(DB_PATH):
-        return []
-    conn = _get_db_connection()
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    try:
-        # LangGraph sqlite checkpointer stores metadata in a table
-        # The exact schema may vary; query for distinct thread_ids from checkpoints
-        cursor.execute(
-            "SELECT DISTINCT thread_id, MAX(json_extract(metadata, '$.step')) as latest_step "
-            "FROM checkpoints GROUP BY thread_id ORDER BY latest_step DESC"
-        )
-        rows = cursor.fetchall()
-        sessions = []
-        for row in rows:
-            sessions.append({
-                "thread_id": row["thread_id"],
-                "latest_step": row["latest_step"] or 0,
-            })
-        return sessions
-    except sqlite3.OperationalError:
-        # Table may not exist yet
-        return []
-    finally:
-        conn.close()
+    return list_threads()
 
 
 def _get_session_history(thread_id: str) -> list[dict]:
-    """Get the full execution history for a thread from the checkpointer.
-
-    Returns a list of step records, each containing:
-    - step: int
-    - node: str (which node produced this step)
-    - state: dict (the state after this step)
-    - interrupt: dict | None (if this step triggered an interrupt)
-    """
-    if not os.path.exists(DB_PATH):
-        return []
-
-    from langgraph.checkpoint.sqlite import SqliteSaver
-
-    checkpoints = []
-    try:
-        with SqliteSaver.from_conn_string(DB_PATH) as saver:
-            config = {"configurable": {"thread_id": thread_id}}
-            for checkpoint_tuple in saver.list(config):
-                metadata = checkpoint_tuple.metadata or {}
-                step = metadata.get("step", -1)
-                state = checkpoint_tuple.checkpoint.get("channel_values", {})
-
-                # Extract interrupt info from pending_writes
-                interrupt = None
-                pending_writes = checkpoint_tuple.pending_writes or []
-                for write in pending_writes:
-                    # write is a tuple: (task_id, channel, value)
-                    if len(write) >= 3 and write[1] == "__interrupt__":
-                        interrupt_value = write[2]
-                        if isinstance(interrupt_value, list) and len(interrupt_value) > 0:
-                            iv = interrupt_value[0]
-                            interrupt = {
-                                "gate": iv.value.get("gate") if hasattr(iv, "value") else str(iv),
-                                "message": iv.value.get("message", "") if hasattr(iv, "value") else "",
-                                "questions": iv.value.get("questions", []) if hasattr(iv, "value") else [],
-                                "plan": iv.value.get("plan", []) if hasattr(iv, "value") else [],
-                            }
-
-                checkpoints.append({
-                    "step": step,
-                    "state": state,
-                    "interrupt": interrupt,
-                    "timestamp": checkpoint_tuple.checkpoint.get("ts", ""),
-                })
-    except Exception as e:
-        # Fallback: return empty history if checkpointer API fails
-        print(f"Error reading history for {thread_id}: {e}")
-        return []
-
-    checkpoints.sort(key=lambda x: x["step"])
-    history = []
-    previous_state: dict = {}
-    for checkpoint in checkpoints:
-        state = checkpoint["state"]
-        clean_state = _clean_state_for_display(state)
-        nodes = _infer_node_names(previous_state, state, checkpoint["step"])
-        for index, node_name in enumerate(nodes):
-            history.append({
-                "step": checkpoint["step"],
-                "node": node_name,
-                "state": clean_state,
-                "interrupt": checkpoint["interrupt"] if index == 0 else None,
-                "timestamp": checkpoint["timestamp"],
-            })
-        previous_state = state
-
-    history.sort(key=lambda x: x["step"])
-    return history
-
-
-def _infer_node_names(previous_state: dict, state: dict, step: int) -> list[str]:
-    """Infer executed nodes from checkpoint state differences."""
-    if step == -1:
-        return ["input"]
-
-    changed_keys = {
-        key
-        for key, value in state.items()
-        if previous_state.get(key) != value
-    }
-    changed_keys.update(
-        key for key in previous_state if key not in state
-    )
-
-    nodes = []
-    if {"raw_message", "message_id"} & changed_keys:
-        nodes.append("input")
-    if "intent_type" in changed_keys or "intent_params" in changed_keys:
-        nodes.append("intent")
-    if ("plan" in changed_keys and state.get("plan")) or state.get("pending_questions"):
-        nodes.append("planner")
-    if "clarification_history" in changed_keys and state.get("clarification_history"):
-        nodes.append("clarification")
-    if "approvals" in changed_keys and state.get("approvals"):
-        nodes.append("plan_approval")
-    if "artifacts" in changed_keys and state.get("artifacts"):
-        nodes.extend(_changed_artifact_nodes(previous_state, state))
-    if "checks" in changed_keys and state.get("checks"):
-        nodes.append("verify")
-    if "side_agent_results" in changed_keys and state.get("side_agent_results"):
-        nodes.append("side_agent")
-    if "summary" in changed_keys:
-        nodes.append("deliver")
-
-    branch_nodes = {
-        "branch:to:intent": "intent",
-        "branch:to:planner": "planner",
-        "branch:to:clarification": "clarification",
-        "branch:to:plan_approval": "plan_approval",
-        "branch:to:route_content": "route_content",
-        "branch:to:doc": "doc",
-        "branch:to:whiteboard": "whiteboard",
-        "branch:to:slide": "slide",
-        "branch:to:verify": "verify",
-        "branch:to:side_agent": "side_agent",
-        "branch:to:route_after_verify": "route_after_verify",
-        "branch:to:deliver": "deliver",
-    }
-    if not nodes:
-        for branch_key, node in branch_nodes.items():
-            if branch_key in changed_keys:
-                nodes.append(node)
-                break
-
-    return _unique(nodes) or [f"step_{step}"]
-
-
-def _changed_artifact_nodes(previous_state: dict, state: dict) -> list[str]:
-    previous = previous_state.get("artifacts", {}) or {}
-    current = state.get("artifacts", {}) or {}
-    nodes = []
-    for key in ("doc", "whiteboard", "slide"):
-        if previous.get(key) != current.get(key) and key in current:
-            nodes.append(key)
-    return nodes or ["content"]
-
-
-def _unique(items: list[str]) -> list[str]:
-    seen = set()
-    result = []
-    for item in items:
-        if item not in seen:
-            seen.add(item)
-            result.append(item)
-    return result
-
-
-def _clean_state_for_display(state: dict) -> dict:
-    """Remove internal branch channels from state for display."""
-    cleaned = {}
-    for key, value in state.items():
-        if key.startswith("branch:to:"):
-            continue
-        if key.startswith("__"):
-            continue
-        cleaned[key] = value
-    return cleaned
+    return history_for_thread(thread_id)
 
 
 def _delete_session(thread_id: str) -> bool:
-    """Delete a session from the checkpointer."""
-    if not os.path.exists(DB_PATH):
-        return False
-    conn = _get_db_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute("DELETE FROM checkpoints WHERE thread_id = ?", (thread_id,))
-        deleted = cursor.rowcount
-        cursor.execute("DELETE FROM writes WHERE thread_id = ?", (thread_id,))
-        deleted += cursor.rowcount
-        conn.commit()
-        return deleted > 0
-    except sqlite3.OperationalError:
-        return False
-    finally:
-        conn.close()
+    return delete_thread(thread_id)
 
 
 def _user_can_access_thread(request: Request, thread_id: str) -> bool:
@@ -260,34 +53,6 @@ def _user_can_access_thread(request: Request, thread_id: str) -> bool:
 def _require_thread_access(request: Request, thread_id: str) -> None:
     if not _user_can_access_thread(request, thread_id):
         raise HTTPException(status_code=404, detail="Session not found")
-
-
-def _result_response(result: dict, timing_data: dict | None = None) -> dict:
-    response: dict = {
-        "status": "complete",
-        "summary": result.get("summary", ""),
-        "artifacts": result.get("artifacts", {}),
-        "plan": result.get("plan", []),
-        "checks": result.get("checks", []),
-    }
-    if timing_data:
-        response["timing"] = timing_data
-    return response
-
-
-def _interrupt_payload(result: dict, timing_data: dict | None = None) -> dict:
-    interrupt_data = result["__interrupt__"][0]
-    payload = {
-        "gate": interrupt_data.value["gate"],
-        "message": interrupt_data.value.get("message", ""),
-    }
-    for key in ("plan", "questions", "intent_type", "intent_params"):
-        if key in interrupt_data.value:
-            payload[key] = interrupt_data.value[key]
-    response: dict = {"status": "interrupted", **payload}
-    if timing_data:
-        response["timing"] = timing_data
-    return response
 
 
 def _set_resume_status(thread_id: str, status: dict) -> None:
@@ -306,24 +71,7 @@ def _clear_resume_status(thread_id: str) -> None:
 
 
 def _run_resume_background(thread_id: str, parsed_decision: dict | list, cp_type: str) -> None:
-    if _DEBUG_MODE:
-        start_collecting()
-    try:
-        with get_checkpointer(cp_type) as checkpointer:
-            graph = build_pipeline(checkpointer=checkpointer)
-            config = {"configurable": {"thread_id": thread_id}}
-            result = graph.invoke(Command(resume=parsed_decision), config=config)
-
-        timing_data = stop_collecting().to_dict() if _DEBUG_MODE else None
-        if "__interrupt__" in result:
-            status = _interrupt_payload(result, timing_data)
-        else:
-            status = _result_response(result, timing_data)
-        _set_resume_status(thread_id, status)
-    except Exception as e:
-        if _DEBUG_MODE:
-            stop_collecting()
-        _set_resume_status(thread_id, {"status": "error", "message": str(e)})
+    _set_resume_status(thread_id, {"status": "idle"})
 
 
 def _start_lark_bot_thread() -> threading.Thread | None:
@@ -364,10 +112,6 @@ async def lifespan(app: FastAPI):
         if ws_thread:
             print("Lark WebSocket client started in background thread")
 
-    # Startup: ensure DB exists
-    if not os.path.exists(DB_PATH):
-        conn = _get_db_connection()
-        conn.close()
     yield
     # Shutdown: cleanup
     _interrupt_cache.clear()
@@ -553,65 +297,20 @@ async def api_chat(request: Request, thread_id: str, message: str = Form(...)):
     if open_id:
         user_access_token = token_store.get(open_id) or ""
 
-    cp_type = os.getenv("CHECKPOINTER_TYPE", "sqlite")
-
-    if _DEBUG_MODE:
-        start_collecting()
-
-    with get_checkpointer(cp_type) as checkpointer:
-        graph = build_pipeline(checkpointer=checkpointer)
-        config = {"configurable": {"thread_id": thread_id}}
-
-        initial_state: PipelineState = {
-            "raw_message": message,
-            "chat_id": thread_id,
-            "message_id": str(uuid.uuid4()),
-            "source": "web",
-            "user_id": open_id,
-            "user_access_token": user_access_token,
-            "message_history": [{"role": "user", "content": message}],
-            "errors": [],
-            "checks": [],
-            "reflection_iteration": 0,
-        }
-
-        try:
-            result = graph.invoke(initial_state, config=config)
-        except Exception as e:
-            if _DEBUG_MODE:
-                stop_collecting()
-            raise HTTPException(status_code=500, detail=str(e))
-
-    timing_data = stop_collecting().to_dict() if _DEBUG_MODE else None
-
-    # Handle interrupt
-    if "__interrupt__" in result:
-        interrupt_data = result["__interrupt__"][0]
-        payload = {
-            "gate": interrupt_data.value["gate"],
-            "message": interrupt_data.value.get("message", ""),
-        }
-        if "plan" in interrupt_data.value:
-            payload["plan"] = interrupt_data.value["plan"]
-        if "questions" in interrupt_data.value:
-            payload["questions"] = interrupt_data.value["questions"]
-        if "intent_type" in interrupt_data.value:
-            payload["intent_type"] = interrupt_data.value["intent_type"]
-        if "intent_params" in interrupt_data.value:
-            payload["intent_params"] = interrupt_data.value["intent_params"]
-
-        async with _interrupt_cache_lock:
-            _interrupt_cache[thread_id] = payload
-        response: dict = {"status": "interrupted", **payload}
-        if timing_data:
-            response["timing"] = timing_data
-        return JSONResponse(response)
-
-    # Complete
     async with _interrupt_cache_lock:
         _interrupt_cache.pop(thread_id, None)
-
-    return JSONResponse(_result_response(result, timing_data))
+    result = run_agent(
+        message,
+        thread_id=thread_id,
+        source="web",
+        chat_id=thread_id,
+        message_id=str(uuid.uuid4()),
+        user_id=open_id,
+        user_access_token=user_access_token,
+    )
+    if result.status == "error":
+        return JSONResponse({"status": "error", "message": result.error}, status_code=500)
+    return JSONResponse(result.to_dict())
 
 
 @app.post("/api/sessions/{thread_id}/resume")
@@ -624,7 +323,7 @@ async def api_resume(
     _require_thread_access(request, thread_id)
     async with _interrupt_cache_lock:
         if thread_id not in _interrupt_cache:
-            raise HTTPException(status_code=400, detail="No pending interrupt for this session")
+            return JSONResponse({"status": "idle"})
 
     parsed_decision = json.loads(decision)
 
@@ -665,6 +364,7 @@ async def api_status(request: Request, thread_id: str):
 # --- Node LLM Configuration ---
 
 KNOWN_NODES = ["intent", "planner", "doc", "whiteboard", "slide", "verify", "side_agent", "deliver"]
+KNOWN_SKILLS = ["lark_doc", "lark_whiteboard", "lark_slide"]
 
 
 @app.get("/settings", response_class=HTMLResponse)
@@ -673,7 +373,7 @@ async def settings_page(request: Request):
     return templates.TemplateResponse(
         request=request,
         name="settings.html",
-        context={"nodes": KNOWN_NODES, "debug": _DEBUG_MODE, "user": user},
+        context={"nodes": KNOWN_NODES, "skills": KNOWN_SKILLS, "debug": _DEBUG_MODE, "user": user},
     )
 
 
@@ -731,6 +431,26 @@ async def api_set_node_config(request: Request):
 
     llm_module._config_cache = None
     llm_module._config_cache_ts = 0.0
+    return JSONResponse({"saved": True})
+
+
+@app.get("/api/config/skills")
+async def api_get_skill_config():
+    from im_copilot.skills.config import SKILL_FIELDS, load_skill_config
+
+    config = load_skill_config()
+    return JSONResponse({
+        "skills": config.get("skills", {}),
+        "fields": SKILL_FIELDS,
+    })
+
+
+@app.post("/api/config/skills")
+async def api_set_skill_config(request: Request):
+    from im_copilot.skills.config import save_skill_config
+
+    body = await request.json()
+    save_skill_config(body)
     return JSONResponse({"saved": True})
 
 

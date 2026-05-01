@@ -6,7 +6,7 @@ import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from im_copilot.memory.events import record_event
+from im_copilot.deep_agent.events import record_event
 from im_copilot.memory.todo_store import TodoRecord, todo_store
 
 logger = logging.getLogger(__name__)
