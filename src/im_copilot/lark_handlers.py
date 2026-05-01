@@ -27,6 +27,12 @@ from lark_oapi.api.im.v1.model.p2_im_message_receive_v1 import P2ImMessageReceiv
 from lark_oapi.api.im.v1.model.p2_im_message_message_read_v1 import (
     P2ImMessageMessageReadV1,
 )
+from lark_oapi.api.im.v1.model.p2_im_message_reaction_created_v1 import (
+    P2ImMessageReactionCreatedV1,
+)
+from lark_oapi.api.im.v1.model.p2_im_message_reaction_deleted_v1 import (
+    P2ImMessageReactionDeletedV1,
+)
 from lark_oapi.event.callback.model.p2_card_action_trigger import (
     CallBackToast,
     P2CardActionTrigger,
@@ -51,6 +57,9 @@ logger = logging.getLogger(__name__)
 
 _PROCESSED_MESSAGE_TTL_SECONDS = 300
 _PERSISTED_MESSAGE_TTL_SECONDS = 7 * 24 * 60 * 60
+_ACK_REACTION = "Get"
+_DONE_REACTION = "DONE"
+_ERROR_REACTION = "CrossMark"
 _processed_messages: dict[str, float] = {}
 _processed_messages_lock = threading.Lock()
 
@@ -426,9 +435,21 @@ def _ws_broadcast(open_id: str, data: dict) -> None:
 
 
 def _ack_message(lark_bot: LarkBot, message_id: str) -> None:
+    _react_message(lark_bot, message_id, _ACK_REACTION)
+
+
+def _complete_message(lark_bot: LarkBot, message_id: str) -> None:
+    _react_message(lark_bot, message_id, _DONE_REACTION)
+
+
+def _fail_message(lark_bot: LarkBot, message_id: str) -> None:
+    _react_message(lark_bot, message_id, _ERROR_REACTION)
+
+
+def _react_message(lark_bot: LarkBot, message_id: str, emoji_type: str) -> None:
     if not message_id:
         return
-    lark_bot.add_reaction(message_id, "OK")
+    lark_bot.add_reaction(message_id, emoji_type)
 
 
 def _reply_result(lark_bot: LarkBot, message_id: str, result: Any) -> None:
@@ -511,10 +532,16 @@ def _process_message(
             cmd_name,
             len(cmd_args),
         )
-        cmd_result = execute_command(cmd_name, cmd_args, chat_id, thread_id, source="feishu", user_id=open_id)
-        if cmd_result.metadata.get("action") == "reset_thread":
-            _reset_chat_thread(chat_id)
-        lark_bot.reply_text(message_id, cmd_result.response_text)
+        try:
+            cmd_result = execute_command(cmd_name, cmd_args, chat_id, thread_id, source="feishu", user_id=open_id)
+            if cmd_result.metadata.get("action") == "reset_thread":
+                _reset_chat_thread(chat_id)
+            lark_bot.reply_text(message_id, cmd_result.response_text)
+            _complete_message(lark_bot, message_id)
+        except Exception as exc:
+            logger.exception("Command error for thread_id=%s", thread_id)
+            _fail_message(lark_bot, message_id)
+            lark_bot.send_text(chat_id, f"处理出错：{exc}")
         return
 
     thread_id = _make_thread_id(chat_id)
@@ -545,6 +572,7 @@ def _process_message(
                 open_id,
             )
             _send_oauth_prompt(lark_bot, chat_id, open_id)
+            _complete_message(lark_bot, message_id)
             return
     logger.info(
         "lark_message oauth_status chat_id=%s message_id=%s thread_id=%s has_user_token=%s",
@@ -575,6 +603,7 @@ def _process_message(
             len(result.error or ""),
         )
         if result.status == "error":
+            _fail_message(lark_bot, message_id)
             lark_bot.reply_text(message_id, f"处理出错：{result.error}")
             return
         logger.info(
@@ -586,6 +615,7 @@ def _process_message(
             (result.summary or "").replace("\n", "\\n")[:200],
         )
         _reply_result(lark_bot, message_id, result)
+        _complete_message(lark_bot, message_id)
         if open_id:
             _ws_broadcast(open_id, {
                 "type": "complete",
@@ -595,6 +625,7 @@ def _process_message(
 
     except Exception as exc:
         logger.exception("Pipeline error for thread_id=%s", thread_id)
+        _fail_message(lark_bot, message_id)
         lark_bot.send_text(chat_id, f"处理出错：{exc}")
         session_manager.delete_session(thread_id)
 
@@ -718,6 +749,18 @@ def on_message_read(data: P2ImMessageMessageReadV1) -> None:
     return None
 
 
+def on_message_reaction_created(data: P2ImMessageReactionCreatedV1) -> None:
+    """Ignore Feishu message reaction created events."""
+    logger.debug("Message reaction created event ignored")
+    return None
+
+
+def on_message_reaction_deleted(data: P2ImMessageReactionDeletedV1) -> None:
+    """Ignore Feishu message reaction deleted events."""
+    logger.debug("Message reaction deleted event ignored")
+    return None
+
+
 def build_event_handler(lark_bot: LarkBot) -> lark.EventDispatcherHandler:
     """Build and return a ``lark.EventDispatcherHandler`` with both handlers
     registered.
@@ -739,6 +782,8 @@ def build_event_handler(lark_bot: LarkBot) -> lark.EventDispatcherHandler:
             partial(on_message_receive, lark_bot=lark_bot)
         )
         .register_p2_im_message_message_read_v1(on_message_read)
+        .register_p2_im_message_reaction_created_v1(on_message_reaction_created)
+        .register_p2_im_message_reaction_deleted_v1(on_message_reaction_deleted)
         .register_p2_card_action_trigger(
             partial(on_card_action, lark_bot=lark_bot)
         )
