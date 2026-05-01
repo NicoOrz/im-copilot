@@ -309,3 +309,81 @@ def create_result_card(
     }
     card["body"]["elements"] = elements
     return card
+
+
+def create_meeting_confirmation_card(
+    *,
+    board_item_id: int,
+    title: str,
+    start: str,
+    end: str,
+    source_text: str,
+    attendee_ids: list[str],
+) -> dict:
+    time_text = f"{start} ~ {end}" if start and end else "时间待确认"
+    attendees_text = "、".join(attendee_ids) if attendee_ids else "仅创建者"
+    content = (
+        f"**会议事项:** {title}\n\n"
+        f"**时间:** {time_text}\n\n"
+        f"**参与人:** {attendees_text}\n\n"
+        f"**来源:** {source_text}"
+    )
+
+    card = _base_card()
+    card["header"] = {
+        "title": {
+            "tag": "plain_text",
+            "content": "是否创建飞书会议",
+        },
+        "template": "orange",
+        "padding": "12px 12px 12px 12px",
+    }
+    card["body"]["elements"] = [
+        {
+            "tag": "markdown",
+            "element_id": "meeting_confirm_md",
+            "content": content,
+            "text_align": "left",
+            "text_size": "normal_v2",
+            "margin": "0px 0px 0px 0px",
+        },
+        {
+            "tag": "button",
+            "element_id": "create_meeting_btn",
+            "text": {
+                "tag": "plain_text",
+                "content": "创建日程",
+            },
+            "type": "primary",
+            "behaviors": [
+                {
+                    "type": "callback",
+                    "value": {
+                        "action": "create_group_meeting_event",
+                        "board_item_id": board_item_id,
+                    },
+                }
+            ],
+            "margin": "8px 0px 0px 0px",
+        },
+        {
+            "tag": "button",
+            "element_id": "ignore_meeting_btn",
+            "text": {
+                "tag": "plain_text",
+                "content": "忽略",
+            },
+            "type": "default",
+            "behaviors": [
+                {
+                    "type": "callback",
+                    "value": {
+                        "action": "ignore_group_meeting_event",
+                        "board_item_id": board_item_id,
+                    },
+                }
+            ],
+            "margin": "8px 0px 0px 0px",
+        },
+    ]
+    return card

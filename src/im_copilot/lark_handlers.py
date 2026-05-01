@@ -45,6 +45,7 @@ from im_copilot.lark_bot import LarkBot
 from im_copilot.lark_card import (
     create_approval_card,
     create_clarification_card,
+    create_meeting_confirmation_card,
     create_progress_card,
     create_result_card,
     create_streaming_card,
@@ -457,16 +458,34 @@ def _reply_result(lark_bot: LarkBot, message_id: str, result: Any) -> None:
     lark_bot.reply_text(message_id, text)
 
 
-def _send_meeting_confirmation_prompts(lark_bot: LarkBot, recipients: list[str], source_text: str) -> None:
-    if not recipients:
+def _send_meeting_confirmation_cards(lark_bot: LarkBot, items: list[Any], recipients: list[str]) -> None:
+    if not items or not recipients:
         return
-    text = (
-        "检测到群聊里可能需要创建会议或评审日程：\n"
-        f"{source_text}\n"
-        "需要时请在群里 @ 我创建日程。"
+    meeting_items = [item for item in items if getattr(item, "item_type", "") == "meeting"]
+    if not meeting_items:
+        return
+    item = meeting_items[-1]
+    metadata = _json_dict(getattr(item, "metadata_json", ""))
+    start = str(metadata.get("start") or getattr(item, "due_at", "") or "")
+    end = str(metadata.get("end") or "")
+    card = create_meeting_confirmation_card(
+        board_item_id=int(item.id),
+        title=str(item.title or "会议"),
+        start=start,
+        end=end,
+        source_text=str(item.source_text or ""),
+        attendee_ids=recipients,
     )
     for open_id in recipients:
-        lark_bot.send_text_to_open_id(open_id, text)
+        lark_bot.send_card_to_open_id(open_id, card)
+
+
+def _json_dict(text: str) -> dict[str, Any]:
+    try:
+        value = json.loads(text or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
 
 
 def _process_message(
@@ -539,7 +558,7 @@ def _process_message(
                 mentions=mentions,
             )
             if board_result.confirmation_recipients:
-                _send_meeting_confirmation_prompts(lark_bot, board_result.confirmation_recipients, text)
+                _send_meeting_confirmation_cards(lark_bot, board_result.items, board_result.confirmation_recipients)
         return
 
     parsed = parse_command(clean_text)
@@ -712,6 +731,93 @@ def _resume_card_action(
     session_manager.delete_session(thread_id)
 
 
+def _handle_group_meeting_card_action(
+    *,
+    action: str,
+    board_item_id: int,
+    operator_open_id: str,
+    lark_bot: LarkBot,
+) -> str:
+    from im_copilot.memory.group_board_store import group_board_store
+    from im_copilot.skills.lark_calendar import create_calendar_event
+
+    item = group_board_store.get(board_item_id)
+    if item is None:
+        return "会议事项不存在或已过期。"
+    if action == "ignore_group_meeting_event":
+        group_board_store.update_status(board_item_id, "deleted")
+        return "已忽略。"
+    if action != "create_group_meeting_event":
+        return "未知会议操作。"
+    if item.status == "confirmed":
+        return "该会议日程已创建。"
+    if not operator_open_id:
+        return "无法识别当前操作人。"
+
+    metadata = _json_dict(item.metadata_json)
+    start = str(metadata.get("start") or item.due_at or "")
+    end = str(metadata.get("end") or "")
+    if not start or not end:
+        return "缺少明确会议时间，请在群里 @ 我并补充时间后再创建日程。"
+
+    uat = token_store.get(operator_open_id) or ""
+    if not uat:
+        lark_bot.send_text_to_open_id(operator_open_id, "创建日程需要先完成授权，请在单聊里发送任意消息并按提示授权。")
+        return "需要先授权。"
+
+    attendee_ids = [operator_open_id, *_json_list(metadata.get("recipients"))]
+    result = create_calendar_event(
+        summary=_calendar_summary(item.title),
+        start=start,
+        end=end,
+        attendee_ids=attendee_ids,
+        description=f"来源群聊：{item.source_text}",
+        user_access_token=uat,
+    )
+    if result.get("status") != "created":
+        return f"创建失败：{result.get('error') or '未知错误'}"
+
+    metadata.update({
+        "calendar_event_token": result.get("token", ""),
+        "calendar_event_url": result.get("url", ""),
+        "created_by": operator_open_id,
+    })
+    group_board_store.update_status(board_item_id, "confirmed", metadata_json=json.dumps(metadata, ensure_ascii=False))
+    record_event(
+        item.chat_id,
+        "feishu",
+        "calendar_event_created",
+        {
+            "board_item_id": board_item_id,
+            "title": item.title,
+            "start": start,
+            "end": end,
+            "attendee_ids": attendee_ids,
+            "token": result.get("token", ""),
+            "url": result.get("url", ""),
+        },
+    )
+    url = result.get("url") or ""
+    return f"日程已创建，并包含飞书视频会议。{url}".strip()
+
+
+def _json_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    for item in value:
+        text = str(item or "").strip()
+        if text and text not in result:
+            result.append(text)
+    return result
+
+
+def _calendar_summary(title: str) -> str:
+    cleaned = re.sub(r"(今天|今日|明天|明日|后天|\d{1,2}月\d{1,2}日)(早上|上午|中午|下午|晚上|晚间)?(\d{1,2}点)?", "", title)
+    cleaned = cleaned.strip(" ，,。")
+    return cleaned[:60] or "会议"
+
+
 def on_card_action(
     data: P2CardActionTrigger,
     lark_bot: LarkBot,
@@ -725,6 +831,24 @@ def on_card_action(
     action_value = (data.event.action.value or {}) if data.event.action else {}
     user_action = action_value.get("action", "")
     logger.info("Card action received: action=%s value=%s", user_action, action_value)
+
+    if user_action in {"create_group_meeting_event", "ignore_group_meeting_event"}:
+        board_item_id = action_value.get("board_item_id")
+        if not isinstance(board_item_id, int):
+            try:
+                board_item_id = int(str(board_item_id))
+            except (TypeError, ValueError):
+                return _make_card_response("无法识别会议事项")
+        operator_open_id = ""
+        if data.event.operator:
+            operator_open_id = data.event.operator.open_id or ""
+        message = _handle_group_meeting_card_action(
+            action=user_action,
+            board_item_id=board_item_id,
+            operator_open_id=operator_open_id,
+            lark_bot=lark_bot,
+        )
+        return _make_card_response(message)
 
     context = data.event.context
     thread_id = action_value.get("thread_id") or (context.open_chat_id if context else "")

@@ -338,6 +338,44 @@ class LarkBot:
             logger.exception("send_card unexpected error: chat_id=%s", chat_id)
             return {"code": -1, "msg": str(exc), "data": None}
 
+    def send_card_to_open_id(self, open_id: str, card_json: dict[str, Any]) -> dict[str, Any]:
+        """Send an interactive card to a user by open_id."""
+        logger.debug("send_card_to_open_id start: open_id=%s card_keys=%s", open_id, list(card_json.keys()))
+        content = json.dumps(card_json, ensure_ascii=False)
+        body = (
+            CreateMessageRequestBodyBuilder()
+            .receive_id(open_id)
+            .msg_type("interactive")
+            .content(content)
+            .build()
+        )
+        req = (
+            CreateMessageRequestBuilder()
+            .receive_id_type("open_id")
+            .request_body(body)
+            .build()
+        )
+
+        try:
+            resp = self._client.im.v1.message.create(req)
+            result = self._unwrap_response(resp)
+            if not resp.success():
+                logger.error(
+                    "send_card_to_open_id failed: code=%s msg=%s open_id=%s",
+                    resp.code,
+                    resp.msg,
+                    open_id,
+                )
+            else:
+                logger.info("send_card_to_open_id success: open_id=%s", open_id)
+            return result
+        except ObtainAccessTokenException as exc:
+            logger.error("send_card_to_open_id auth error: %s", exc)
+            return {"code": exc.code, "msg": str(exc), "data": None}
+        except Exception as exc:
+            logger.exception("send_card_to_open_id unexpected error: open_id=%s", open_id)
+            return {"code": -1, "msg": str(exc), "data": None}
+
     def reply_card(self, message_id: str, card_json: dict[str, Any]) -> dict[str, Any]:
         """Reply to a specific message with an interactive card.
 

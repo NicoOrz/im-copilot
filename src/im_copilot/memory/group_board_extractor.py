@@ -92,7 +92,14 @@ def extract_and_store_group_board_items(
             status="pending_confirmation",
             source_open_id=source_open_id,
             source_text=clean,
-            metadata_json=json.dumps({"recipients": recipients}, ensure_ascii=False),
+            metadata_json=json.dumps(
+                {
+                    "recipients": recipients,
+                    "start": due_at.isoformat(timespec="minutes") if due_at else "",
+                    "end": (due_at + timedelta(minutes=30)).isoformat(timespec="minutes") if due_at else "",
+                },
+                ensure_ascii=False,
+            ),
         )
         if item:
             created.append(item)

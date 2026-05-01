@@ -141,6 +141,32 @@ class GroupBoardStore:
             ).fetchall()
         return [_row_to_item(row) for row in rows]
 
+    def get(self, item_id: int) -> GroupBoardItem | None:
+        with _conn() as conn:
+            row = conn.execute("SELECT * FROM group_board_items WHERE id = ?", (item_id,)).fetchone()
+        return _row_to_item(row) if row else None
+
+    def update_status(
+        self,
+        item_id: int,
+        status: BoardItemStatus,
+        *,
+        metadata_json: str | None = None,
+    ) -> GroupBoardItem | None:
+        now = time.time()
+        if metadata_json is None:
+            sql = "UPDATE group_board_items SET status = ?, updated_at = ? WHERE id = ?"
+            params: tuple[object, ...] = (status, now, item_id)
+        else:
+            sql = "UPDATE group_board_items SET status = ?, metadata_json = ?, updated_at = ? WHERE id = ?"
+            params = (status, metadata_json, now, item_id)
+        with _conn() as conn:
+            cursor = conn.execute(sql, params)
+            if cursor.rowcount == 0:
+                return None
+            row = conn.execute("SELECT * FROM group_board_items WHERE id = ?", (item_id,)).fetchone()
+        return _row_to_item(row) if row else None
+
 
 def _row_to_item(row: sqlite3.Row) -> GroupBoardItem:
     return GroupBoardItem(
