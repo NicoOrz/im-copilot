@@ -55,6 +55,7 @@ def _handle_help(args: str, chat_id: str, thread_id: str, source: str, user_id: 
         "可用命令：\n"
         "/new - 开始新对话（重置当前会话上下文）\n"
         "/todo - 查看待办\n"
+        "/todo board - 查看群共享看板\n"
         "/todo done <id> - 标记完成\n"
         "/todo delete <id> - 删除待办\n"
         "/todo summary today - 查看今日群聊任务摘要\n"
@@ -76,6 +77,19 @@ def _handle_todo(args: str, chat_id: str, thread_id: str, source: str, user_id: 
     parts = args.split()
     action = parts[0].lower() if parts else "list"
 
+    if action == "board":
+        return CommandResult(True, "todo", summary_today(chat_id))
+
+    if action == "summary" and len(parts) >= 2 and parts[1].lower() == "today":
+        return CommandResult(True, "todo", summary_today(chat_id))
+
+    if action == "sync":
+        count = sync_today(chat_id)
+        return CommandResult(True, "todo", f"已从今日本地消息提取 {count} 个待办。")
+
+    if source == "feishu_group":
+        return CommandResult(True, "todo", "个人待办仅在单聊中展示。群内可使用 /todo board 查看共享看板。")
+
     if action == "done" and len(parts) >= 2:
         if not user_id:
             return CommandResult(True, "todo", "无法识别当前用户。")
@@ -92,16 +106,9 @@ def _handle_todo(args: str, chat_id: str, thread_id: str, source: str, user_id: 
         ok = todo_store.delete(int(parts[1]), user_id)
         return CommandResult(True, "todo", "已删除。" if ok else "未找到可操作的待办。")
 
-    if action == "summary" and len(parts) >= 2 and parts[1].lower() == "today":
-        return CommandResult(True, "todo", summary_today(chat_id))
-
-    if action == "sync":
-        count = sync_today(chat_id)
-        return CommandResult(True, "todo", f"已从今日本地消息提取 {count} 个待办。")
-
     if not user_id:
         return CommandResult(True, "todo", "无法识别当前用户。")
-    todos = todo_store.list(assignee_open_id=user_id, chat_id="" if source == "web" else chat_id)
+    todos = todo_store.list(assignee_open_id=user_id, chat_id="")
     if not todos:
         return CommandResult(True, "todo", "暂无待办。")
     lines = ["待办："]

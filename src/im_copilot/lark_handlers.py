@@ -457,6 +457,18 @@ def _reply_result(lark_bot: LarkBot, message_id: str, result: Any) -> None:
     lark_bot.reply_text(message_id, text)
 
 
+def _send_meeting_confirmation_prompts(lark_bot: LarkBot, recipients: list[str], source_text: str) -> None:
+    if not recipients:
+        return
+    text = (
+        "检测到群聊里可能需要创建会议或评审日程：\n"
+        f"{source_text}\n"
+        "需要时请在群里 @ 我创建日程。"
+    )
+    for open_id in recipients:
+        lark_bot.send_text_to_open_id(open_id, text)
+
+
 def _process_message(
     text: str,
     chat_id: str,
@@ -469,6 +481,7 @@ def _process_message(
     sender_type: str = "",
 ) -> None:
     from im_copilot.commands import parse_command, execute_command
+    from im_copilot.memory.group_board_extractor import extract_and_store_group_board_items
     from im_copilot.memory.todo_extractor import extract_and_store_todos
 
     clean_text = _AT_MENTION_RE.sub("", text.strip())
@@ -518,6 +531,15 @@ def _process_message(
                 source_open_id=open_id,
                 mentions=mentions,
             )
+            board_result = extract_and_store_group_board_items(
+                text,
+                chat_id=chat_id,
+                message_id=message_id,
+                source_open_id=open_id,
+                mentions=mentions,
+            )
+            if board_result.confirmation_recipients:
+                _send_meeting_confirmation_prompts(lark_bot, board_result.confirmation_recipients, text)
         return
 
     parsed = parse_command(clean_text)
@@ -533,7 +555,8 @@ def _process_message(
             len(cmd_args),
         )
         try:
-            cmd_result = execute_command(cmd_name, cmd_args, chat_id, thread_id, source="feishu", user_id=open_id)
+            command_source = "feishu_group" if is_group else "feishu"
+            cmd_result = execute_command(cmd_name, cmd_args, chat_id, thread_id, source=command_source, user_id=open_id)
             if cmd_result.metadata.get("action") == "reset_thread":
                 _reset_chat_thread(chat_id)
             lark_bot.reply_text(message_id, cmd_result.response_text)

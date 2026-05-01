@@ -4,6 +4,7 @@ from datetime import datetime, time as dt_time
 from zoneinfo import ZoneInfo
 
 from im_copilot.deep_agent.events import iter_user_messages_for_chat
+from im_copilot.memory.group_board_extractor import extract_and_store_group_board_items
 from im_copilot.memory.todo_extractor import extract_and_store_todos
 
 _TZ = ZoneInfo("Asia/Hong_Kong")
@@ -21,5 +22,12 @@ def sync_today(chat_id: str) -> int:
             source_open_id=str(payload.get("source_open_id") or payload.get("user_id") or ""),
             source=str(event.get("source") or "feishu"),
         )
-        count += len(records)
+        board = extract_and_store_group_board_items(
+            str(payload.get("text") or ""),
+            chat_id=chat_id,
+            message_id=str(payload.get("message_id") or event.get("id")),
+            source_open_id=str(payload.get("source_open_id") or payload.get("user_id") or ""),
+            source=str(event.get("source") or "feishu"),
+        )
+        count += len(records) + len(board.items)
     return count

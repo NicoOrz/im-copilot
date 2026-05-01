@@ -21,6 +21,8 @@ class TodoDraft:
     due_at: datetime
     remind_at: datetime
     source_text: str
+    confidence: float = 1.0
+    needs_confirmation: bool = False
 
 
 def extract_todos_from_message(
@@ -50,6 +52,8 @@ def extract_todos_from_message(
             due_at=due_at,
             remind_at=remind_at,
             source_text=clean,
+            confidence=1.0,
+            needs_confirmation=False,
         )
     ]
 
@@ -72,39 +76,63 @@ def extract_and_store_todos(
         now=now,
     )
     for draft in drafts:
-        record = todo_store.create(
+        if draft.needs_confirmation:
+            continue
+        record = store_todo_draft(
+            draft,
             chat_id=chat_id,
             message_id=message_id,
             source_open_id=source_open_id,
-            assignee_open_id=draft.assignee_open_id,
-            title=draft.title,
-            action=draft.action,
-            due_at=draft.due_at.isoformat(timespec="minutes"),
-            remind_at=draft.remind_at.isoformat(timespec="minutes"),
-            source_text=draft.source_text,
+            source=source,
         )
         if record is None:
             continue
         records.append(record)
-        record_event(
-            chat_id,
-            source,
-            "todo_detected",
-            {
-                "id": record.id,
-                "chat_id": chat_id,
-                "message_id": message_id,
-                "source_open_id": source_open_id,
-                "assignee_open_id": record.assignee_open_id,
-                "title": record.title,
-                "action": record.action,
-                "due_at": record.due_at,
-                "remind_at": record.remind_at,
-                "status": record.status,
-                "source_text": record.source_text,
-            },
-        )
     return records
+
+
+def store_todo_draft(
+    draft: TodoDraft,
+    *,
+    chat_id: str,
+    message_id: str,
+    source_open_id: str,
+    source: str = "feishu",
+) -> TodoRecord | None:
+    record = todo_store.create(
+        chat_id=chat_id,
+        message_id=message_id,
+        source_open_id=source_open_id,
+        assignee_open_id=draft.assignee_open_id,
+        title=draft.title,
+        action=draft.action,
+        due_at=draft.due_at.isoformat(timespec="minutes"),
+        remind_at=draft.remind_at.isoformat(timespec="minutes"),
+        source_text=draft.source_text,
+    )
+    if record is None:
+        return None
+    record_event(
+        chat_id,
+        source,
+        "todo_detected",
+        {
+            "id": record.id,
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "source_open_id": source_open_id,
+            "assignee_open_id": record.assignee_open_id,
+            "title": record.title,
+            "action": record.action,
+            "due_at": record.due_at,
+            "remind_at": record.remind_at,
+            "status": record.status,
+            "source_text": record.source_text,
+            "confidence": draft.confidence,
+            "needs_confirmation": draft.needs_confirmation,
+        },
+    )
+    return record
 
 
 def _clean_text(text: str) -> str:
