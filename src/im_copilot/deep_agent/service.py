@@ -568,8 +568,7 @@ def _fetch_linked_doc_context(
     for item in fetched_refs[:2]:
         parts.append(
             f"引用文档：{item['ref']}\n"
-            f"结构化重点（生成时必须优先复用这些字段）：\n{item['summary'] or '未提取到结构化重点'}\n\n"
-            f"原始 DocxXML：\n{item['content']}"
+            f"结构化重点：\n{item['summary'] or '未提取到结构化重点'}"
         )
     context = "\n\n".join(parts)
     logger.info("linked_doc_context built thread_id=%s context_len=%s", thread_id, len(context))
@@ -631,7 +630,7 @@ def _generation_context(
     if linked_doc_context:
         parts.append(linked_doc_context)
     if recent:
-        parts.append(recent)
+        parts.append(_truncate_context(recent, 6000))
     return "\n\n".join(parts)
 
 
@@ -668,11 +667,15 @@ def _json_array_has_item(text: str, key: str) -> bool:
 def _doc_rewrite_message(message: str, previous_content: str, missing_requirements: list[str]) -> str:
     return (
         f"{message}\n\n"
-        "上一次生成的 DocxXML：\n"
-        f"{previous_content}\n\n"
+        "上一次生成的 DocxXML 片段：\n"
+        f"{_truncate_context(previous_content, 4000)}\n\n"
         "请重新生成完整 DocxXML，并修正以下缺失项：\n"
         + "\n".join(f"- {item}" for item in missing_requirements)
     )
+
+
+def _truncate_context(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[:limit] + "\n...[truncated]"
 
 
 def _route_message(message: str, thread_id: str) -> RouteDecision:

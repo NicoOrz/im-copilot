@@ -20,35 +20,38 @@ _LARK_DOC_ROOT = Path(
 
 _DOC_TOOL_NAME = "create_doc_artifact"
 
-_DOCXXML_CAPABILITIES = """DocxXML 能力使用规则：
-- @人：结构化重点中出现 cite_users.user_id 时，必须复用 <cite type="user" user-id="..."></cite>；不知道用户 ID 时，用普通姓名文本，不要编造 user-id。
-- @文档：结构化重点中出现 doc_id 时，必须复用 <cite type="doc" doc-id="..."></cite>。只有 URL 时优先使用 <a href="...">...</a> 或 <bookmark name="..." href="..."></bookmark>。
-- 白板：结构化重点中有 whiteboards 时，必须在总结中保留一个白板；已有 token 可用 <whiteboard token="..."></whiteboard>，否则用 <whiteboard type="mermaid">...</whiteboard>。
-- 思维导图：优先使用 Mermaid mindmap 语法放入 whiteboard；只在内容适合树状主题拆解时使用。
-- 流程图/架构图：优先使用 Mermaid flowchart 语法放入 whiteboard；节点文字保持简短。
-- 不要生成 <whiteboard token="...">，除非用户明确提供已有 whiteboard token；新建画板必须使用 type="mermaid"、type="plantuml" 或 type="blank"。
-- 图片：结构化重点中出现 images.href 时，可以复用 <img href="..." caption="..."/>；没有可访问图片 URL 时不要编造 src、token、内部下载链接。
-- 分栏：结构化重点中出现 grids 时，可复用 <grid><column>...</column></grid> 的分栏呈现方式，尤其适合“左文字、右图片/图示”。
-- 链接：结构化重点或用户输入中出现 URL 时，必须放入“相关链接”。普通链接用 <a href="...">标题</a>；重要资源用 <bookmark name="标题" href="..."></bookmark>。
-- 待办：结构化重点中出现 checkboxes 时，必须参考其 done 状态和 user_ids；文档内任务清单用 <checkbox done="false">...</checkbox>，不要使用 Markdown 复选框。
-- 提醒时间：只有用户给出明确时间戳或可确定时间时，才使用 <time>。
-- 复杂信息优先用 h1/h2、ul/ol、table、callout、blockquote、checkbox、whiteboard 组合表达，保持合法 XML。"""
+_DOCXXML_CAPABILITIES = """DocxXML 规则：
+- 常用标签：title、p、h1-h3、ul、ol、li、table、thead、tbody、tr、th、td、blockquote、callout、checkbox、grid、column、whiteboard、img、a、bookmark、cite、hr、b、code、span。
+- XML 标签本身不要转义；仅转义文本内的 <、>、&。
+- cite_users.user_id 非空时用 <cite type="user" user-id="..."></cite>，未知 ID 才用普通姓名。
+- whiteboards.token 非空时可用 <whiteboard token="..."></whiteboard>；新图示用 <whiteboard type="mermaid">...</whiteboard>。
+- images 仅能复用已有 href/src，不要编造图片地址。
+- links 非空时使用 <a href="...">...</a> 或 <bookmark name="..." href="..."></bookmark>。
+- checkboxes 非空时用 <checkbox done="true|false">...</checkbox>。"""
 
 _MEETING_MINUTES_TEMPLATE = """会议纪要模板（必须输出 DocxXML）：
-- 适用条件：用户要求生成会议纪要、会议记录、会议总结、会后整理，或材料明显来自会议讨论。
-- 禁止输出 Markdown：不得使用 # 标题、**加粗**、Markdown 表格、代码块或纯文本清单替代 XML 标签。
-- 标题：<title>智能纪要：会议主题 日期</title>，日期缺失时使用“会议纪要：主题”。
-- 标题后第一个 blockquote 必须包含 3 个独立段落：<p>会议主题：...</p><p>会议时间：...</p><p>参会人：...</p>；不要把三项合并到一个 p，不要用 br，不要给字段名加粗。
-- 标题后第二个 blockquote 只包含一段固定文本：<p>智能会议纪要由 AI 生成，可能不准确，请谨慎甄别后使用</p>；不要加 emoji，不要加粗。
-- 一级标题只允许这三个且顺序固定：<h1>总结</h1>、<h1>待办</h1>、<h1>相关链接</h1>。
-- 总结标题后先写一个 p，概括会议目标、讨论范围、主要结论和后续方向。
-- 总结正文使用多层 ul：一级 li 是主题模块，模块标题用 <b>...</b>；主题名不要加 emoji。二级 li 是议题，三级 li 写事实、决策、分歧、风险、时间节点和负责人。
-- 总结不得使用表格替代多层列表；每个主题模块控制在 2 到 5 个要点，避免短句堆叠。
-- 如果结构化重点中有 whiteboards，必须在总结标题后保留一个白板；如果材料能提取关键结构图或流程关系，可以生成 <whiteboard type="mermaid">...</whiteboard>；不能确认结构时不要生成新 whiteboard。
-- 不要生成 img，除非结构化重点或用户材料中给出可用图片 URL。
-- 待办：只使用 <checkbox done="false">...</checkbox>；每项写“任务名：具体事项（负责人：姓名或负责人未提及）”。已完成事项可用 done="true"。
-- 相关链接：用 ul 嵌套展示链接来源和链接项；链接必须来自用户材料、用户输入中的 URL 或引用文档。没有链接时写 <p>未提及相关链接</p>。
-- 全文保持客观纪要风格，不添加无依据事实。"""
+- 纯文本会议材料优先使用表格化结构：title、概要 callout、基本信息表、已达成共识表、待定事项表、后续 Action。
+- 标题：<title>会议纪要：会议主题</title> 或 <title>智能纪要：会议主题 日期</title>。
+- 开头：<callout background-color="rgb(240,244,255)" border-color="rgb(130,167,252)" emoji="📝"><p><b>会议概要：</b>时间、参与人、主题、核心结论、待定问题。</p></callout>
+- <h1>基本信息</h1> 后用两列表格，列名为“项目 / 内容”，行包含时间、参与人、主题。
+- <h1>已达成共识</h1> 后用两列表格，列名为“决议项 / 结论”；没有明确共识时写“未提及”。
+- <h1>待定事项</h1> 后可加黄色 callout 提醒分歧，再用三列表格，列名为“事项 / 分歧点 / 涉及方”；没有待定事项时写“未提及”。
+- <h1>后续 Action</h1> 后只用 <checkbox done="false">负责人：任务</checkbox>，已完成事项用 done="true"。
+- 仅当材料或结构化重点中有链接时，才追加 <h1>相关链接</h1>。"""
+
+_PRD_TEMPLATE = """PRD 模板（用户要求 PRD、产品需求文档、需求方案、需求说明时必须输出 DocxXML）：
+- 用户要求 PRD 时优先使用本模板，即使原始材料来自会议、聊天记录或已有文档。
+- 标题：<title>PRD：项目或需求名称</title>。
+- 一级标题与顺序固定：<h1>文档版本记录</h1>、<h1>一、 项目背景</h1>、<h1>二、 项目目标与评估</h1>、<h1>三、 竞品调研</h1>、<h1>四、 需求描述</h1>、<h1>五、 上线后效果评估</h1>。
+- 文档版本记录使用四列表格，列名固定为“文档版本 / 更新日期 / 撰写人 / 说明”；缺失信息写“待完善”。
+- 项目背景要说明项目动因、需求来源、当前业务问题、相关数据或调研结论、各利益相关方收益；仅使用材料中可依据的信息。
+- 项目目标与评估要写清产品业务目标、项目价值评估方式、可量化指标、指标计算方式；缺失指标写“待完善”，不要编造数值。
+- 竞品调研使用四列表格，列名固定为“竞品 / 核心设计思路 / 详细功能说明及截图 / 可借鉴点”；没有竞品材料时保留表头并写“待调研”。
+- 需求描述必须包含两个二级标题：<h2>1、需求概述</h2>、<h2>2、需求详述</h2>。
+- 需求概述用一个段落说明需求要做什么、解决什么业务问题、面向哪些用户或场景。
+- 需求详述按材料组织业务流程、交互或视觉逻辑、原型信息、AB 实验方案、埋点需求、历史数据处理、新旧系统兼容、后端模块逻辑和业务规则；没有材料的部分不要展开。
+- 上线后效果评估在需求未上线时写“待上线后评估”；已有上线数据时写评估指标、数据来源、观察周期和结论。
+- 不要把模板指导语写入正文；未知信息统一写“待完善”。"""
 
 
 class ForceDocArtifactToolMiddleware(AgentMiddleware):
@@ -147,13 +150,13 @@ def build_doc_agent(
 
 
 def build_doc_task_message(message: str, *, markdown: bool = False) -> str:
-    doc_format = "Markdown" if markdown else "DocxXML"
     task_message = (
         "请根据用户原始请求生成完整飞书文档，并调用 create_doc_artifact 创建产物。\n"
-        "原始 lark-doc 规则已经在 system prompt 中提供，直接生成内容并调用工具。\n"
+        "DocxXML 规则已经在 system prompt 中提供，直接生成内容并调用工具。\n"
+        "如用户要求生成 PRD 或产品需求文档，必须使用 system prompt 中的 PRD 模板。\n"
         "如用户要求生成会议纪要，必须使用 system prompt 中的会议纪要模板。\n"
         "如用户原始请求中包含“生成约束上下文”，其中的结构化字段 JSON 和生成要求必须落实到文档 XML。\n"
-        f"输出格式：{doc_format}\n\n"
+        "输出格式：DocxXML\n\n"
         "用户原始请求：\n"
         f"{message}"
     )
@@ -177,6 +180,7 @@ def generate_doc_content(message: str) -> str:
 - 忠实反映用户材料的关键信息，不添加无依据事实
 - DocxXML 必须包含唯一 <title>
 - 必须输出合法 XML 标签结构，标签本身不要转义
+- 如果是 PRD 或产品需求文档，必须使用 PRD 模板，且输出 DocxXML，不得输出 Markdown
 - 如果是会议纪要，必须使用会议纪要模板，且输出 DocxXML，不得输出 Markdown
 - 如果用户原始请求包含“生成约束上下文”，必须把其中的 cite_users、whiteboards、images、checkboxes、links、grids 转化为对应 DocxXML 标签
 - 若 links 或用户输入 URL 非空，相关链接不得写“未提及相关链接”
@@ -192,11 +196,12 @@ def _doc_generation_prompt() -> str:
     return f"""你是 IM Copilot 的文档内容生成器。始终用中文输出。
 
 职责：
-- 直接遵循下方原始 lark-doc skill 创建规则。
 - 根据用户材料生成完整文档内容，不添加无依据事实。
 - 固定使用 DocxXML，即使用户提到 Markdown 也输出 DocxXML。
 - 当前代码会负责创建飞书文档；你只负责输出文档内容。
+- 如用户要求生成 PRD、产品需求文档、需求方案或需求说明，必须使用下方 PRD 模板。
 - 如用户要求生成会议纪要，必须使用下方会议纪要模板。
+- 如果用户要求从会议材料生成 PRD，使用 PRD 模板。
 - 用户消息中如果出现“生成约束上下文”，它不是普通参考资料；其中“结构化字段 JSON”和“生成要求”是本次输出的硬性输入。
 - 生成会议纪要时，参会人、待办负责人、白板、图片、分栏和相关链接优先来自结构化字段 JSON。
 - 输出前检查：结构化字段 JSON 中非空的 cite_users、whiteboards、checkboxes、links、grids，应在最终 DocxXML 中出现对应 <cite>、<whiteboard>、<checkbox>、<a>/<bookmark>、<grid> 标签；没有可用图片 URL 时才省略 <img>。
@@ -207,7 +212,7 @@ def _doc_generation_prompt() -> str:
 
 {_MEETING_MINUTES_TEMPLATE}
 
-以下是原始 lark-doc skill 与创建文档必需参考资料，已经预读给你：
+{_PRD_TEMPLATE}
 
 {context}
 """
@@ -247,49 +252,37 @@ def _doc_system_prompt(*, markdown: bool = False) -> str:
     return f"""你是 IM Copilot 的文档 Deep Agent。始终用中文回答用户。
 
 职责：
-- 直接遵循下方原始 lark-doc skill 创建规则。
 - 根据用户材料生成完整文档内容，不添加无依据事实。
-- 默认使用 DocxXML；会议纪要始终使用 DocxXML。
-- 仅当用户明确要求 Markdown 且不是会议纪要时，才使用 Markdown。
+- 固定使用 DocxXML，即使用户提到 Markdown 也输出 DocxXML。
 - 生成内容后必须调用 create_doc_artifact。
 - create_doc_artifact 是当前环境的飞书文档创建工具；不要直接调用 lark-cli。
 - 工具调用完成后，只返回简洁结果，包含标题、状态和链接。
 - 不得把准备动作作为最终回复；最终回复只允许出现在 create_doc_artifact 工具调用之后。
-- 不要再次读取 skill 文件；下方资料就是本次任务所需的完整规则。
+- 如用户要求生成 PRD、产品需求文档、需求方案或需求说明，必须使用下方 PRD 模板。
 - 如用户要求生成会议纪要，必须使用下方会议纪要模板。
+- 如果用户要求从会议材料生成 PRD，使用 PRD 模板。
 - 用户消息中如果出现“生成约束上下文”，它不是普通参考资料；其中“结构化字段 JSON”和“生成要求”是本次输出的硬性输入。
 - 生成会议纪要时，参会人、待办负责人、白板、图片、分栏和相关链接优先来自结构化字段 JSON。
 - 输出前检查：结构化字段 JSON 中非空的 cite_users、whiteboards、checkboxes、links、grids，应在最终 DocxXML 中出现对应 <cite>、<whiteboard>、<checkbox>、<a>/<bookmark>、<grid> 标签；没有可用图片 URL 时才省略 <img>。
 
-当前格式：{"Markdown" if markdown else "DocxXML"}
+当前格式：DocxXML
 
 {_DOCXXML_CAPABILITIES}
 
 {_MEETING_MINUTES_TEMPLATE}
 
-以下是原始 lark-doc skill 与创建文档必需参考资料，已经预读给你：
+{_PRD_TEMPLATE}
 
 {context}
 """
 
 
 def _lark_doc_context(*, markdown: bool = False) -> str:
-    paths = [
-        _LARK_DOC_ROOT / "SKILL.md",
-        _LARK_DOC_ROOT / "references" / "style" / "lark-doc-create-workflow.md",
-        _LARK_DOC_ROOT / "references" / "style" / "lark-doc-style.md",
-        _LARK_DOC_ROOT / "references" / ("lark-doc-md.md" if markdown else "lark-doc-xml.md"),
-    ]
-    parts = []
-    for path in paths:
-        parts.append(f"## {path}\n{_read_text(path)}")
-    context = "\n\n".join(parts)
-    logger.info(
-        "lark_doc_context loaded markdown=%s files=%s total_chars=%s",
-        markdown,
-        len(paths),
-        len(context),
+    context = (
+        "输出要求：只输出合法 DocxXML；每篇只含一个 <title>；"
+        "不要输出 Markdown 标题、代码块或 Markdown 表格。"
     )
+    logger.info("lark_doc_context loaded compact markdown=%s total_chars=%s", markdown, len(context))
     return context
 
 

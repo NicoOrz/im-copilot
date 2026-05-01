@@ -178,21 +178,12 @@ def summarize_docx_xml_content(content: str) -> str:
     compact_fields = _compact_docx_xml_fields(fields)
     lines = [
         "结构化字段 JSON:",
-        json.dumps(compact_fields, ensure_ascii=False, indent=2),
+        json.dumps(compact_fields, ensure_ascii=False, separators=(",", ":")),
     ]
     reuse_requirements = _docx_xml_reuse_requirements(compact_fields)
     if reuse_requirements:
         lines.append("生成要求:")
         lines.extend(f"- {item}" for item in reuse_requirements)
-    if fields["title"]:
-        lines.append(f"title: {fields['title']}")
-    lines.extend(_format_items("headings", fields["headings"]))
-    lines.extend(_format_items("cite_users", fields["cite_users"]))
-    lines.extend(_format_items("whiteboards", fields["whiteboards"]))
-    lines.extend(_format_items("images", fields["images"]))
-    lines.extend(_format_items("checkboxes", fields["checkboxes"]))
-    lines.extend(_format_items("links", fields["links"]))
-    lines.extend(_format_items("grids", fields["grids"]))
     return "\n".join(lines)
 
 
@@ -209,12 +200,14 @@ def extract_docx_xml_fields(content: str) -> dict[str, Any]:
     fields: dict[str, Any] = {
         "title": "",
         "headings": [],
+        "callouts": [],
         "cite_users": [],
         "whiteboards": [],
         "images": [],
         "checkboxes": [],
         "links": [],
         "grids": [],
+        "tables": [],
     }
 
     for node in root.iter():
@@ -225,6 +218,11 @@ def extract_docx_xml_fields(content: str) -> dict[str, Any]:
             fields["headings"].append({
                 "level": tag,
                 "text": _compact_text(node),
+            })
+        elif tag == "callout":
+            fields["callouts"].append({
+                "emoji": node.attrib.get("emoji", ""),
+                "text": _truncate(_compact_text(node), 260),
             })
         elif tag == "cite":
             cite_type = node.attrib.get("type", "")
@@ -279,6 +277,8 @@ def extract_docx_xml_fields(content: str) -> dict[str, Any]:
             })
         elif tag == "grid":
             fields["grids"].append(_grid_summary(node))
+        elif tag == "table":
+            fields["tables"].append(_table_summary(node))
 
     return fields
 
@@ -299,6 +299,13 @@ def _extract_docx_xml_fields_fallback(content: str) -> dict[str, Any]:
         "headings": [
             {"level": level, "text": _strip_tags(text)}
             for level, text in re.findall(r"<(h[1-9])\b[^>]*>(.*?)</h[1-9]>", content, re.S)
+        ],
+        "callouts": [
+            {"emoji": attrs.get("emoji", ""), "text": _truncate(_strip_tags(text), 260)}
+            for attrs, text in (
+                (_attrs(attrs), text)
+                for attrs, text in re.findall(r"<callout\b([^>]*)>(.*?)</callout>", content, re.S)
+            )
         ],
         "cite_users": [
             {"user_id": user_id, "context": ""}
@@ -340,6 +347,10 @@ def _extract_docx_xml_fields_fallback(content: str) -> dict[str, Any]:
         "grids": [
             {"columns": [], "text": _truncate(_strip_tags(text), 400)}
             for text in re.findall(r"<grid\b[^>]*>(.*?)</grid>", content, re.S)
+        ],
+        "tables": [
+            {"headers": [], "text": _truncate(_strip_tags(text), 400)}
+            for text in re.findall(r"<table\b[^>]*>(.*?)</table>", content, re.S)
         ],
     }
     return fields
@@ -397,28 +408,48 @@ def _grid_summary(node: ET.Element) -> dict[str, Any]:
     }
 
 
+def _table_summary(node: ET.Element) -> dict[str, Any]:
+    headers = [
+        _compact_text(cell)
+        for cell in node.iter()
+        if _tag_name(cell.tag) == "th"
+    ][:6]
+    rows = [
+        [
+            _truncate(_compact_text(cell), 80)
+            for cell in row
+            if _tag_name(cell.tag) in {"td", "th"}
+        ]
+        for row in node.iter()
+        if _tag_name(row.tag) == "tr"
+    ][:4]
+    return {"headers": headers, "rows": rows}
+
+
 def _compact_docx_xml_fields(fields: dict[str, Any]) -> dict[str, Any]:
     return {
         "title": fields.get("title", ""),
-        "headings": fields.get("headings", [])[:12],
+        "headings": fields.get("headings", [])[:8],
+        "callouts": fields.get("callouts", [])[:3],
         "cite_users": [
             item for item in fields.get("cite_users", [])
             if item.get("user_id")
-        ][:12],
+        ][:8],
         "whiteboards": [
             item for item in fields.get("whiteboards", [])
             if item.get("token") or item.get("type") or item.get("text")
-        ][:6],
+        ][:3],
         "images": [
             item for item in fields.get("images", [])
             if item.get("href") or item.get("src")
-        ][:8],
-        "checkboxes": fields.get("checkboxes", [])[:12],
+        ][:4],
+        "checkboxes": fields.get("checkboxes", [])[:8],
         "links": [
             item for item in fields.get("links", [])
             if item.get("href") or item.get("doc_id")
-        ][:12],
-        "grids": fields.get("grids", [])[:6],
+        ][:8],
+        "grids": fields.get("grids", [])[:3],
+        "tables": fields.get("tables", [])[:4],
     }
 
 
