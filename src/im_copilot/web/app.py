@@ -524,7 +524,14 @@ async def api_chat(request: Request, thread_id: str, message: str = Form(...)):
     parsed = parse_command(message.strip())
     if parsed is not None:
         cmd_name, cmd_args = parsed
-        cmd_result = execute_command(cmd_name, cmd_args, thread_id, thread_id, source="web")
+        cmd_result = execute_command(
+            cmd_name,
+            cmd_args,
+            thread_id,
+            thread_id,
+            source="web",
+            user_id=user["open_id"] if user else "",
+        )
         if cmd_result.metadata.get("action") == "reset_thread":
             new_thread_id = str(uuid.uuid4())
             if user:

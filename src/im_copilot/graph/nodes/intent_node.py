@@ -29,9 +29,18 @@ INTENT_PROMPT = """分析用户的输入消息，判断其意图类型，并制�
 3. create_multi 时，根据用户需求选择需要的步骤（doc/whiteboard/slide），然后 deliver
 4. chat 时，直接 deliver
 5. 用户消息中已包含足够内容（如原文、数据、会议纪要等）时，直接输出计划，不要再问用户要材料
+6. 多轮对话中，用户针对近期产物提出修改、重做、继续处理、质量质疑或纠错请求时，必须结合历史和近期产物判断要执行的产物步骤，不能判为 chat
+7. 用户用“这个、它、刚才那个、上一个”等指代时，优先结合近期产物判断指代对象
+8. 只有用户没有要求生成、修改或重新处理任何产物时，才判为 chat
 
 历史对话：
 {history}
+
+近期产物：
+{artifact_context}
+
+历史澄清问答：
+{clarification_history}
 
 用户消息：{message}
 
@@ -66,10 +75,18 @@ class IntentOutput(BaseModel):
 def intent_node(state: PipelineState) -> dict:
     raw_message = state.get("raw_message", "")
     history = format_history(state.get("message_history", [])[:-1])
-    prompt = INTENT_PROMPT.format(message=raw_message, history=history)
+    artifact_context = _format_artifact_context(state)
+    clarification_history = _format_clarification_history(state)
+    prompt = INTENT_PROMPT.format(
+        message=raw_message,
+        history=history,
+        artifact_context=artifact_context,
+        clarification_history=clarification_history,
+    )
     llm = get_llm_for_node("intent").with_structured_output(IntentOutput)
     result: IntentOutput = llm.invoke(prompt)
     intent_type = result.intent_type
+
     plan = getattr(result, "plan", None)
     if not isinstance(plan, list) or not plan:
         plan = _default_plan(intent_type)
@@ -88,13 +105,16 @@ def intent_node(state: PipelineState) -> dict:
         else []
     )
 
-    return {
+    update = {
         "intent_type": intent_type,
         "intent_params": {"topic": result.topic},
         "intent_confidence": result.confidence,
         "plan": [] if pending_questions else plan,
         "pending_questions": pending_questions,
     }
+    if not pending_questions and any(step in plan for step in ("doc", "whiteboard", "slide")):
+        update["artifacts"] = {}
+    return update
 
 
 _INTENT_TO_PLAN: dict[str, list[str]] = {
@@ -108,3 +128,28 @@ _INTENT_TO_PLAN: dict[str, list[str]] = {
 
 def _default_plan(intent_type: str) -> list[str]:
     return list(_INTENT_TO_PLAN.get(intent_type, ["deliver"]))
+
+
+def _format_clarification_history(state: PipelineState) -> str:
+    history = state.get("clarification_history", [])
+    if not history:
+        return "（无历史澄清记录）"
+    return "\n".join(
+        f"Q: {turn['question']}\nA: {turn['answer']}"
+        for turn in history
+    )
+
+
+def _format_artifact_context(state: PipelineState) -> str:
+    artifacts = state.get("artifacts", {})
+    if not artifacts:
+        return "（无近期产物）"
+    lines: list[str] = []
+    for step, artifact in artifacts.items():
+        if not isinstance(artifact, dict):
+            continue
+        title = artifact.get("title", step)
+        status = artifact.get("status", "")
+        url = artifact.get("url", "")
+        lines.append(f"- {step}: {title} {status} {url}".strip())
+    return "\n".join(lines) if lines else "（无近期产物）"

@@ -160,6 +160,44 @@ class LarkBot:
             logger.exception("send_text unexpected error: chat_id=%s", chat_id)
             return {"code": -1, "msg": str(exc), "data": None}
 
+    def send_text_to_open_id(self, open_id: str, text: str) -> dict[str, Any]:
+        """Send a plain text message to a user by open_id."""
+        logger.debug("send_text_to_open_id start: open_id=%s text_len=%s", open_id, len(text))
+        content = json.dumps({"text": text}, ensure_ascii=False)
+        body = (
+            CreateMessageRequestBodyBuilder()
+            .receive_id(open_id)
+            .msg_type("text")
+            .content(content)
+            .build()
+        )
+        req = (
+            CreateMessageRequestBuilder()
+            .receive_id_type("open_id")
+            .request_body(body)
+            .build()
+        )
+
+        try:
+            resp = self._client.im.v1.message.create(req)
+            result = self._unwrap_response(resp)
+            if not resp.success():
+                logger.error(
+                    "send_text_to_open_id failed: code=%s msg=%s open_id=%s",
+                    resp.code,
+                    resp.msg,
+                    open_id,
+                )
+            else:
+                logger.info("send_text_to_open_id success: open_id=%s", open_id)
+            return result
+        except ObtainAccessTokenException as exc:
+            logger.error("send_text_to_open_id auth error: %s", exc)
+            return {"code": exc.code, "msg": str(exc), "data": None}
+        except Exception as exc:
+            logger.exception("send_text_to_open_id unexpected error: open_id=%s", open_id)
+            return {"code": -1, "msg": str(exc), "data": None}
+
     def reply_text(self, message_id: str, text: str) -> dict[str, Any]:
         """Reply to a specific message with plain text.
 

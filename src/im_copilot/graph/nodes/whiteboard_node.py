@@ -1,5 +1,6 @@
 import logging
 import re
+from typing import Any
 
 from im_copilot.lark_cli import run_lark_cli
 from im_copilot.llm import get_llm_for_node
@@ -20,6 +21,19 @@ WHITEBOARD_PROMPT = """你是一位专业的可视化设计助手。请根据用
 - 忠实反映原始材料的关键信息和关系
 - 节点文字使用中文，简洁清晰
 - 不要添加额外解释"""
+
+
+def _extract_whiteboard_token(resp: dict[str, Any]) -> str:
+    data = resp.get("data", {})
+    board_tokens = data.get("board_tokens")
+    if isinstance(board_tokens, list) and board_tokens:
+        return str(board_tokens[0] or "")
+
+    document = data.get("document", {})
+    for block in document.get("new_blocks", []) or []:
+        if block.get("block_type") == "whiteboard" and block.get("block_token"):
+            return str(block["block_token"])
+    return ""
 
 
 def whiteboard_node(state: PipelineState) -> dict:
@@ -53,25 +67,27 @@ def whiteboard_node(state: PipelineState) -> dict:
             return {"artifacts": {**state.get("artifacts", {}), "whiteboard": result}}
 
         # Step 2: insert blank whiteboard block
-        run_lark_cli([
+        update_resp = run_lark_cli([
             "docs", "+update",
             "--api-version", "v2",
             "--doc", obj_token,
-            "--markdown", "",
-            "--mode", "overwrite",
+            "--command", "append",
+            "--content", '<whiteboard type="blank"></whiteboard>',
             "--as", "user",
         ], uat=uat)
+        wb_token = _extract_whiteboard_token(update_resp)
 
-        # Step 3: fetch doc to extract whiteboard token
-        fetch_resp = run_lark_cli([
-            "docs", "+fetch",
-            "--api-version", "v2",
-            "--doc", obj_token,
-            "--as", "user",
-        ], uat=uat)
-        content = fetch_resp.get("data", {}).get("document", {}).get("content", "")
-        match = re.search(r'token="([^"]+)"', content)
-        wb_token = match.group(1) if match else ""
+        if not wb_token:
+            # Step 3: fetch doc to extract whiteboard token
+            fetch_resp = run_lark_cli([
+                "docs", "+fetch",
+                "--api-version", "v2",
+                "--doc", obj_token,
+                "--as", "user",
+            ], uat=uat)
+            content = fetch_resp.get("data", {}).get("document", {}).get("content", "")
+            match = re.search(r'<whiteboard[^>]+token="([^"]+)"', content)
+            wb_token = match.group(1) if match else ""
 
         if wb_token:
             # Step 4: write Mermaid content
@@ -81,6 +97,7 @@ def whiteboard_node(state: PipelineState) -> dict:
                 "--source", "-",
                 "--input_format", "mermaid",
                 "--overwrite",
+                "--yes",
                 "--as", "user",
             ], uat=uat, stdin=mermaid)
             url = f"https://www.feishu.cn/docx/{obj_token}"

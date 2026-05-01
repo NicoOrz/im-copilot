@@ -1,10 +1,9 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
-from langgraph.types import Command
 from langgraph.checkpoint.memory import InMemorySaver
 
-from im_copilot.graph.pipeline import build_pipeline, run_pipeline
+from im_copilot.graph.pipeline import build_pipeline
 
 
 class MockLLM:
@@ -22,19 +21,34 @@ class PipelineTests(unittest.TestCase):
         graph = build_pipeline()
         self.assertIsNotNone(graph)
 
-    @patch("im_copilot.graph.nodes.side_agent_node.get_llm_for_node")
-    @patch("im_copilot.graph.nodes.verify_node.get_llm_for_node")
+    @patch("im_copilot.graph.nodes.slide_node.run_lark_cli")
+    @patch("im_copilot.graph.nodes.whiteboard_node.run_lark_cli")
+    @patch("im_copilot.graph.nodes.doc_node.run_lark_cli")
     @patch("im_copilot.graph.nodes.intent_node.get_llm_for_node")
-    @patch("im_copilot.graph.nodes.planner_node.get_llm_for_node")
     @patch("im_copilot.graph.nodes.doc_node.get_llm_for_node")
     @patch("im_copilot.graph.nodes.whiteboard_node.get_llm_for_node")
     @patch("im_copilot.graph.nodes.slide_node.get_llm_for_node")
     @patch("im_copilot.graph.nodes.deliver_node.get_llm_for_node")
-    def test_multi_input_invokes_doc_whiteboard_slide(self, mock_deliver, mock_slide, mock_wb, mock_doc, mock_planner, mock_intent, mock_verify, mock_side_agent):
+    def test_multi_input_invokes_doc_whiteboard_slide(
+        self,
+        mock_deliver,
+        mock_slide,
+        mock_wb,
+        mock_doc,
+        mock_intent,
+        mock_doc_cli,
+        mock_wb_cli,
+        mock_slide_cli,
+    ):
         mock_intent.return_value = MockLLM()
-        mock_intent.return_value.invoke.return_value = MagicMock(intent_type="create_multi", topic="报告", confidence=0.9)
-        mock_planner.return_value = MockLLM()
-        mock_planner.return_value.invoke.return_value = MagicMock(plan=["doc", "whiteboard", "slide", "deliver"], needs_clarification=False, questions=[])
+        mock_intent.return_value.invoke.return_value = MagicMock(
+            intent_type="create_multi",
+            topic="报告",
+            confidence=0.9,
+            needs_clarification=False,
+            questions=[],
+            plan=["doc", "whiteboard", "slide", "deliver"],
+        )
         mock_doc.return_value = MockLLM()
         mock_doc.return_value.invoke.return_value = MagicMock(content="doc内容")
         mock_wb.return_value = MockLLM()
@@ -43,17 +57,15 @@ class PipelineTests(unittest.TestCase):
         mock_slide.return_value.invoke.return_value = MagicMock(content="slide内容")
         mock_deliver.return_value = MockLLM()
         mock_deliver.return_value.invoke.return_value = MagicMock(content="汇总结果")
-        mock_verify.return_value = MockLLM()
-        mock_verify.return_value.invoke.return_value = MagicMock(status="pass", reason="质量合格")
-        mock_side_agent.return_value = MockLLM()
-        mock_side_agent.return_value.invoke.return_value = MagicMock(
-            validation_score=0.95,
-            relevance="高度相关",
-            completeness="完整",
-            accuracy="准确",
-            readability="清晰",
-            issues=[],
-        )
+        mock_doc_cli.return_value = {"data": {"document": {"document_id": "doc-token"}}}
+        mock_wb_cli.side_effect = [
+            {"data": {"obj_token": "docx-token"}},
+            {"data": {"document": {"new_blocks": [
+                {"block_type": "whiteboard", "block_token": "wb-token"}
+            ]}}},
+            {},
+        ]
+        mock_slide_cli.return_value = {"data": {"presentation": {"presentation_token": "slide-token"}}}
 
         checkpointer = InMemorySaver()
         graph = build_pipeline(checkpointer=checkpointer)
@@ -69,43 +81,41 @@ class PipelineTests(unittest.TestCase):
         }
 
         result = graph.invoke(initial_state, config=config)
-        # Handle plan_approval interrupt
-        if "__interrupt__" in result:
-            result = graph.invoke(Command(resume={"approved": True, "feedback": "test"}), config=config)
-
         self.assertEqual(result["intent_type"], "create_multi")
         self.assertEqual(result["plan"], ["doc", "whiteboard", "slide", "deliver"])
         self.assertIn("doc", result["artifacts"])
         self.assertIn("whiteboard", result["artifacts"])
         self.assertIn("slide", result["artifacts"])
-        self.assertIn("汇总结果", result["summary"])
+        mock_deliver.assert_not_called()
+        self.assertIn("文档：报告：https://www.feishu.cn/docx/doc-token", result["summary"])
+        self.assertIn("白板：报告：https://www.feishu.cn/docx/docx-token", result["summary"])
+        self.assertIn("PPT：报告：https://www.feishu.cn/slides/slide-token", result["summary"])
 
-    @patch("im_copilot.graph.nodes.side_agent_node.get_llm_for_node")
-    @patch("im_copilot.graph.nodes.verify_node.get_llm_for_node")
+    @patch("im_copilot.graph.nodes.whiteboard_node.run_lark_cli")
     @patch("im_copilot.graph.nodes.intent_node.get_llm_for_node")
-    @patch("im_copilot.graph.nodes.planner_node.get_llm_for_node")
     @patch("im_copilot.graph.nodes.whiteboard_node.get_llm_for_node")
     @patch("im_copilot.graph.nodes.deliver_node.get_llm_for_node")
-    def test_whiteboard_only_input(self, mock_deliver, mock_wb, mock_planner, mock_intent, mock_verify, mock_side_agent):
+    def test_whiteboard_only_input(self, mock_deliver, mock_wb, mock_intent, mock_wb_cli):
         mock_intent.return_value = MockLLM()
-        mock_intent.return_value.invoke.return_value = MagicMock(intent_type="create_whiteboard", topic="流程图", confidence=0.9)
-        mock_planner.return_value = MockLLM()
-        mock_planner.return_value.invoke.return_value = MagicMock(plan=["whiteboard", "deliver"], needs_clarification=False, questions=[])
+        mock_intent.return_value.invoke.return_value = MagicMock(
+            intent_type="create_whiteboard",
+            topic="流程图",
+            confidence=0.9,
+            needs_clarification=False,
+            questions=[],
+            plan=["whiteboard", "deliver"],
+        )
         mock_wb.return_value = MockLLM()
         mock_wb.return_value.invoke.return_value = MagicMock(content="wb内容")
         mock_deliver.return_value = MockLLM()
         mock_deliver.return_value.invoke.return_value = MagicMock(content="汇总结果")
-        mock_verify.return_value = MockLLM()
-        mock_verify.return_value.invoke.return_value = MagicMock(status="pass", reason="质量合格")
-        mock_side_agent.return_value = MockLLM()
-        mock_side_agent.return_value.invoke.return_value = MagicMock(
-            validation_score=0.95,
-            relevance="高度相关",
-            completeness="完整",
-            accuracy="准确",
-            readability="清晰",
-            issues=[],
-        )
+        mock_wb_cli.side_effect = [
+            {"data": {"obj_token": "docx-token"}},
+            {"data": {"document": {"new_blocks": [
+                {"block_type": "whiteboard", "block_token": "wb-token"}
+            ]}}},
+            {},
+        ]
 
         checkpointer = InMemorySaver()
         graph = build_pipeline(checkpointer=checkpointer)
@@ -121,21 +131,24 @@ class PipelineTests(unittest.TestCase):
         }
 
         result = graph.invoke(initial_state, config=config)
-        if "__interrupt__" in result:
-            result = graph.invoke(Command(resume={"approved": True, "feedback": "test"}), config=config)
 
         self.assertEqual(result["intent_type"], "create_whiteboard")
         self.assertEqual(result["plan"], ["whiteboard", "deliver"])
         self.assertEqual(set(result["artifacts"].keys()), {"whiteboard"})
+        mock_deliver.assert_not_called()
 
     @patch("im_copilot.graph.nodes.intent_node.get_llm_for_node")
-    @patch("im_copilot.graph.nodes.planner_node.get_llm_for_node")
     @patch("im_copilot.graph.nodes.deliver_node.get_llm_for_node")
-    def test_chat_input(self, mock_deliver, mock_planner, mock_intent):
+    def test_chat_input(self, mock_deliver, mock_intent):
         mock_intent.return_value = MockLLM()
-        mock_intent.return_value.invoke.return_value = MagicMock(intent_type="chat", topic="你好", confidence=0.9)
-        mock_planner.return_value = MockLLM()
-        mock_planner.return_value.invoke.return_value = MagicMock(plan=["deliver"], needs_clarification=False, questions=[])
+        mock_intent.return_value.invoke.return_value = MagicMock(
+            intent_type="chat",
+            topic="你好",
+            confidence=0.9,
+            needs_clarification=False,
+            questions=[],
+            plan=["deliver"],
+        )
         mock_deliver.return_value = MockLLM()
         mock_deliver.return_value.invoke.return_value = MagicMock(content="你好！有什么可以帮你的？")
 
@@ -153,8 +166,6 @@ class PipelineTests(unittest.TestCase):
         }
 
         result = graph.invoke(initial_state, config=config)
-        if "__interrupt__" in result:
-            result = graph.invoke(Command(resume={"approved": True, "feedback": "test"}), config=config)
 
         self.assertEqual(result["intent_type"], "chat")
         self.assertEqual(result["plan"], ["deliver"])

@@ -1,13 +1,7 @@
 """Event handlers for Feishu (Lark) bot WebSocket events.
 
 This module wires incoming messages and card actions into the LangGraph
-pipeline, manages interactive cards, and handles HITL interrupts via the
-session manager.
-
-Interaction design:
-- All intents use a streaming card for LLM output (typing effect)
-- Non-chat intents show progress steps then approval cards
-- Chat intents stream the reply directly in the card
+pipeline. New message handling replies with plain text.
 """
 
 from __future__ import annotations
@@ -44,6 +38,7 @@ from im_copilot.lark_card import (
     create_result_card,
     create_streaming_card,
 )
+from im_copilot.memory.events import record_event
 from im_copilot.session_manager import session_manager
 from im_copilot.user_session_store import session_store as user_session_store
 from im_copilot.user_token_store import token_store
@@ -183,6 +178,8 @@ _chat_generation: dict[str, int] = {}
 _chat_generation_lock = threading.Lock()
 
 _AT_MENTION_RE = re.compile(r"^@\S+\s*")
+_reminder_started = False
+_reminder_lock = threading.Lock()
 
 
 def _is_interrupt_update(step: dict[str, Any]) -> bool:
@@ -200,6 +197,26 @@ def _get_interrupt_info(step: dict[str, Any]) -> dict[str, Any] | None:
     if hasattr(interrupt_data, "value"):
         return interrupt_data.value  # type: ignore[union-attr]
     return interrupt_data  # type: ignore[return-value]
+
+
+def _mentions_bot(text: str, mentions: list[dict[str, Any]]) -> bool:
+    bot_open_id = os.getenv("LARK_BOT_OPEN_ID") or os.getenv("FEISHU_BOT_OPEN_ID") or ""
+    if bot_open_id:
+        return any(m.get("open_id") == bot_open_id for m in mentions)
+    return bool(mentions and _AT_MENTION_RE.match(text.strip()))
+
+
+def _mention_dicts(message: Any) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for mention in getattr(message, "mentions", None) or []:
+        user_id = getattr(mention, "id", None)
+        result.append({
+            "key": getattr(mention, "key", "") or "",
+            "name": getattr(mention, "name", "") or "",
+            "open_id": getattr(user_id, "open_id", "") if user_id else "",
+            "user_id": getattr(user_id, "user_id", "") if user_id else "",
+        })
+    return result
 
 
 def _send_streaming_card(lark_bot: LarkBot, chat_id: str) -> tuple[str | None, str | None]:
@@ -388,15 +405,55 @@ def _ws_broadcast(open_id: str, data: dict) -> None:
         logger.debug("WS broadcast skipped (no event loop or ws_manager unavailable)")
 
 
-def _process_message(text: str, chat_id: str, message_id: str, lark_bot: LarkBot, open_id: str = "") -> None:
+def _process_message(
+    text: str,
+    chat_id: str,
+    message_id: str,
+    lark_bot: LarkBot,
+    open_id: str = "",
+    *,
+    chat_type: str = "",
+    mentions: list[dict[str, Any]] | None = None,
+    sender_type: str = "",
+) -> None:
     from im_copilot.commands import parse_command, execute_command
+    from im_copilot.memory.todo_extractor import extract_and_store_todos
 
     clean_text = _AT_MENTION_RE.sub("", text.strip())
+    mentions = mentions or []
+    is_group = (chat_type or "").lower() not in {"", "p2p", "private"}
+    is_command = parse_command(clean_text) is not None
+    is_mentioned = _mentions_bot(text, mentions)
+    is_bot_message = sender_type.lower() == "bot"
+
+    if is_group and not is_command and not is_mentioned:
+        if not is_bot_message:
+            record_event(
+                chat_id,
+                "feishu",
+                "user_message",
+                {
+                    "text": text,
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "source_open_id": open_id,
+                    "user_id": open_id,
+                },
+            )
+            extract_and_store_todos(
+                text,
+                chat_id=chat_id,
+                message_id=message_id,
+                source_open_id=open_id,
+                mentions=mentions,
+            )
+        return
+
     parsed = parse_command(clean_text)
     if parsed is not None:
         cmd_name, cmd_args = parsed
         thread_id = _make_thread_id(chat_id)
-        cmd_result = execute_command(cmd_name, cmd_args, chat_id, thread_id, source="feishu")
+        cmd_result = execute_command(cmd_name, cmd_args, chat_id, thread_id, source="feishu", user_id=open_id)
         if cmd_result.metadata.get("action") == "reset_thread":
             _reset_chat_thread(chat_id)
         lark_bot.reply_text(message_id, cmd_result.response_text)
@@ -418,6 +475,17 @@ def _process_message(text: str, chat_id: str, message_id: str, lark_bot: LarkBot
             _send_oauth_prompt(lark_bot, chat_id, open_id)
             return
 
+    active_session = session_manager.get_session(thread_id)
+    if active_session is not None:
+        _resume_text_session(
+            thread_id=thread_id,
+            text=clean_text,
+            message_id=message_id,
+            lark_bot=lark_bot,
+            open_id=open_id,
+        )
+        return
+
     try:
         with get_checkpointer("sqlite") as checkpointer:
             logger.debug("Checkpointer opened: thread_id=%s", thread_id)
@@ -437,89 +505,12 @@ def _process_message(text: str, chat_id: str, message_id: str, lark_bot: LarkBot
                 "reflection_iteration": 0,
             }
 
-            # Stream from START so the graph runs intent_node itself;
-            # peek at the first step to fast-path chat replies without cards.
-            logger.debug("Graph stream start: thread_id=%s", thread_id)
-            stream = graph.stream(
-                initial_state,
-                config=config,
-                stream_mode="updates",
-            )
-            final_state: dict[str, Any] = dict(initial_state)
-
-            # Peek first step to detect chat intent and reply directly
-            try:
-                first_step = next(stream)
-            except StopIteration:
-                first_step = None
-
-            if first_step is None:
-                logger.debug("Empty stream, nothing to process: thread_id=%s", thread_id)
-                return
-
-            if not _is_interrupt_update(first_step):
-                for node_name, update in first_step.items():
-                    if isinstance(update, dict):
-                        final_state.update(update)
-                if final_state.get("intent_type") == "chat":
-                    logger.debug("Chat fast-path: thread_id=%s message_id=%s", thread_id, message_id)
-                    for step in stream:
-                        if _is_interrupt_update(step):
-                            interrupt_info = _get_interrupt_info(step)
-                            if interrupt_info:
-                                session = session_manager.create_session(
-                                    thread_id=thread_id,
-                                    graph=graph,
-                                    config=config,
-                                    chat_id=chat_id,
-                                    open_id=open_id,
-                                )
-                                session_manager.update_session(
-                                    thread_id,
-                                    last_interrupt=interrupt_info,
-                                )
-                                _update_card_for_interrupt(lark_bot, session, interrupt_info)
-                            logger.debug("Process message paused: thread_id=%s message_id=%s", thread_id, message_id)
-                            return
-                        for node_name, update in step.items():
-                            if isinstance(update, dict):
-                                final_state.update(update)
-                    summary = final_state.get("summary", "")
-                    logger.debug("Chat deliver result: thread_id=%s summary_len=%s", thread_id, len(summary))
-                    if summary:
-                        lark_bot.reply_text(message_id, summary)
-                    if open_id:
-                        _ws_broadcast(open_id, {"type": "complete", "thread_id": thread_id, "data": {"summary": summary}})
-                    logger.debug("Process message done: thread_id=%s message_id=%s mode=chat", thread_id, message_id)
-                    return
-
-                # Non-chat: create streaming card and continue
-                card_entity_id, msg_id = _send_streaming_card(lark_bot, chat_id)
-                if not card_entity_id:
-                    lark_bot.send_text(chat_id, "暂时无法创建飞书交互卡片，请稍后重试。")
-                    return
-
-                logger.debug("Create session start: thread_id=%s card_entity_id=%s message_id=%s", thread_id, card_entity_id, msg_id)
-                session = session_manager.create_session(
-                    thread_id=thread_id,
-                    graph=graph,
-                    config=config,
-                    card_id=msg_id,
-                    chat_id=chat_id,
-                    open_id=open_id,
-                )
-                session_manager.update_session(
-                    thread_id,
-                    card_message_id=msg_id,
-                    card_entity_id=card_entity_id,
-                )
-
-                detail = f"节点 {node_name} 执行中..."
-                _update_progress_card(lark_bot, session, node_name, detail)
-            elif _is_interrupt_update(first_step):
-                interrupt_info = _get_interrupt_info(first_step)
+            logger.debug("Graph invoke start: thread_id=%s", thread_id)
+            final_state = graph.invoke(initial_state, config=config)
+            if "__interrupt__" in final_state:
+                interrupt_info = _get_interrupt_info(final_state)
                 if interrupt_info:
-                    session = session_manager.create_session(
+                    session_manager.create_session(
                         thread_id=thread_id,
                         graph=graph,
                         config=config,
@@ -530,43 +521,93 @@ def _process_message(text: str, chat_id: str, message_id: str, lark_bot: LarkBot
                         thread_id,
                         last_interrupt=interrupt_info,
                     )
-                    _update_card_for_interrupt(lark_bot, session, interrupt_info)
+                    questions = interrupt_info.get("questions", [])
+                    if questions:
+                        lark_bot.reply_text(message_id, "需要确认：\n" + "\n".join(f"- {q}" for q in questions))
+                    else:
+                        lark_bot.reply_text(message_id, interrupt_info.get("message", "需要更多信息。"))
                 logger.debug("Process message paused: thread_id=%s message_id=%s", thread_id, message_id)
                 return
 
-            for step in stream:
-                logger.debug("Graph stream step: thread_id=%s keys=%s", thread_id, list(step.keys()))
-                if _is_interrupt_update(step):
-                    interrupt_info = _get_interrupt_info(step)
-                    if interrupt_info:
-                        session_manager.update_session(
-                            thread_id,
-                            last_interrupt=interrupt_info,
-                        )
-                        logger.debug("Graph interrupt received: thread_id=%s gate=%s", thread_id, interrupt_info.get("gate"))
-                        _update_card_for_interrupt(lark_bot, session, interrupt_info)
-                    logger.debug("Process message paused: thread_id=%s message_id=%s", thread_id, message_id)
-                    return
-
-                for node_name, update in step.items():
-                    if isinstance(update, dict):
-                        final_state.update(update)
-                    detail = f"节点 {node_name} 执行中..."
-                    _update_progress_card(lark_bot, session, node_name, detail)
-
-            logger.debug("Resume stream finished: thread_id=%s final_keys=%s", thread_id, list(final_state.keys()))
-            _finalize_card(lark_bot, session, final_state)
+            summary = final_state.get("summary", "")
+            logger.debug(
+                "Graph invoke finished: thread_id=%s message_id=%s intent=%s summary_len=%s artifact_count=%s",
+                thread_id,
+                message_id,
+                final_state.get("intent_type", ""),
+                len(summary),
+                len(final_state.get("artifacts", {})),
+            )
+            if summary:
+                lark_bot.reply_text(message_id, summary)
             if open_id:
                 _ws_broadcast(open_id, {
-                    "type": "complete", "thread_id": thread_id,
-                    "data": {"summary": final_state.get("summary", ""), "artifacts": final_state.get("artifacts", {})},
+                    "type": "complete",
+                    "thread_id": thread_id,
+                    "data": {"summary": summary, "artifacts": final_state.get("artifacts", {})},
                 })
             session_manager.delete_session(thread_id)
-            logger.debug("Resume worker done: thread_id=%s", thread_id)
+            logger.debug("Process message done: thread_id=%s message_id=%s", thread_id, message_id)
 
     except Exception as exc:
         logger.exception("Pipeline error for thread_id=%s", thread_id)
         lark_bot.send_text(chat_id, f"处理出错：{exc}")
+        session_manager.delete_session(thread_id)
+
+
+def _resume_text_session(
+    *,
+    thread_id: str,
+    text: str,
+    message_id: str,
+    lark_bot: LarkBot,
+    open_id: str = "",
+) -> None:
+    from langgraph.types import Command
+
+    session = session_manager.get_session(thread_id)
+    if session is None:
+        lark_bot.reply_text(message_id, "当前没有待处理的问题。")
+        return
+
+    config = session["config"]
+    last_interrupt = session.get("last_interrupt") or {}
+    questions = last_interrupt.get("questions") or []
+    decision: str | list[str] = text
+    if len(questions) > 1:
+        answers = [line.strip() for line in text.splitlines() if line.strip()]
+        decision = answers or [text]
+
+    try:
+        with get_checkpointer("sqlite") as checkpointer:
+            graph = build_pipeline(checkpointer=checkpointer)
+            result = graph.invoke(Command(resume=decision), config=config)
+
+        if "__interrupt__" in result:
+            interrupt_info = _get_interrupt_info(result)
+            if interrupt_info:
+                session_manager.update_session(thread_id, last_interrupt=interrupt_info)
+                next_questions = interrupt_info.get("questions", [])
+                if next_questions:
+                    lark_bot.reply_text(message_id, "需要确认：\n" + "\n".join(f"- {q}" for q in next_questions))
+                else:
+                    lark_bot.reply_text(message_id, interrupt_info.get("message", "需要更多信息。"))
+            return
+
+        summary = result.get("summary", "")
+        if summary:
+            lark_bot.reply_text(message_id, summary)
+        if open_id:
+            _ws_broadcast(open_id, {
+                "type": "complete",
+                "thread_id": thread_id,
+                "data": {"summary": summary, "artifacts": result.get("artifacts", {})},
+            })
+        session_manager.delete_session(thread_id)
+    except Exception as exc:
+        logger.exception("Resume text error for thread_id=%s", thread_id)
+        chat_id = session.get("chat_id", thread_id)
+        lark_bot.send_text(chat_id, f"继续处理时出错：{exc}")
         session_manager.delete_session(thread_id)
 
 
@@ -583,9 +624,13 @@ def on_message_receive(data: P2ImMessageReceiveV1, lark_bot: LarkBot) -> None:
 
     chat_id = message.chat_id or ""
     message_id = message.message_id or ""
+    chat_type = message.chat_type or ""
+    mentions = _mention_dicts(message)
     open_id = ""
+    sender_type = ""
     if data.event.sender and data.event.sender.sender_id:
         open_id = data.event.sender.sender_id.open_id or ""
+        sender_type = data.event.sender.sender_type or ""
     logger.debug("Message parsed: chat_id=%s message_id=%s open_id=%s text_len=%s", chat_id, message_id, open_id, len(text))
 
     if not _mark_message_processing(message_id):
@@ -599,6 +644,7 @@ def on_message_receive(data: P2ImMessageReceiveV1, lark_bot: LarkBot) -> None:
     worker = threading.Thread(
         target=_process_message,
         args=(text, chat_id, message_id, lark_bot, open_id),
+        kwargs={"chat_type": chat_type, "mentions": mentions, "sender_type": sender_type},
         daemon=True,
     )
     worker.start()
@@ -735,6 +781,13 @@ def build_event_handler(lark_bot: LarkBot) -> lark.EventDispatcherHandler:
     registered.
     """
     logger.debug("Building Lark event handler")
+    global _reminder_started
+    with _reminder_lock:
+        if not _reminder_started:
+            from im_copilot.memory.reminder_worker import start_reminder_loop
+
+            start_reminder_loop(lark_bot)
+            _reminder_started = True
     return (
         lark.EventDispatcherHandler.builder(
             lark_bot._encrypt_key,

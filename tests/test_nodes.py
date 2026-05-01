@@ -39,6 +39,47 @@ class IntentNodeTests(unittest.TestCase):
         result = intent_node({"raw_message": "帮我写报告并生成 PPT"})
         self.assertEqual(result["intent_type"], "create_multi")
 
+    @patch("im_copilot.graph.nodes.intent_node.get_llm_for_node")
+    def test_includes_artifact_context_for_followup_intent(self, mock_get_llm):
+        mock_llm = MockLLM()
+        mock_llm.invoke.return_value = MagicMock(
+            intent_type="create_whiteboard",
+            topic="修改上一版白板",
+            confidence=0.9,
+            plan=["whiteboard", "deliver"],
+        )
+        mock_get_llm.return_value = mock_llm
+        result = intent_node({
+            "raw_message": "这个有问题，重新处理一下",
+            "artifacts": {
+                "whiteboard": {
+                    "kind": "whiteboard",
+                    "title": "白板：流程图",
+                    "status": "created",
+                    "url": "https://www.feishu.cn/docx/x",
+                }
+            },
+        })
+        prompt = mock_llm.invoke.call_args.args[0]
+        self.assertIn("近期产物", prompt)
+        self.assertIn("白板：流程图", prompt)
+        self.assertEqual(result["intent_type"], "create_whiteboard")
+        self.assertEqual(result["plan"], ["whiteboard", "deliver"])
+        self.assertEqual(result["artifacts"], {})
+
+    @patch("im_copilot.graph.nodes.intent_node.get_llm_for_node")
+    def test_chat_intent_keeps_existing_artifacts_out_of_update(self, mock_get_llm):
+        mock_llm = MockLLM()
+        mock_llm.invoke.return_value = MagicMock(intent_type="chat", topic="继续聊", confidence=0.9)
+        mock_get_llm.return_value = mock_llm
+        result = intent_node({
+            "raw_message": "谢谢",
+            "artifacts": {"whiteboard": {"kind": "whiteboard", "title": "白板：流程图"}},
+        })
+        self.assertEqual(result["intent_type"], "chat")
+        self.assertEqual(result["plan"], ["deliver"])
+        self.assertNotIn("artifacts", result)
+
 
 class PlannerNodeTests(unittest.TestCase):
     @patch("im_copilot.graph.nodes.planner_node.get_llm_for_node")
@@ -118,10 +159,28 @@ class DeliverNodeTests(unittest.TestCase):
         self.assertEqual(result["summary"], "收到，你好！")
 
     @patch("im_copilot.graph.nodes.deliver_node.get_llm_for_node")
-    def test_deliver_artifacts(self, mock_get_llm):
+    def test_deliver_chat_retries_invalid_llm_response(self, mock_get_llm):
         mock_llm = MockLLM()
-        mock_llm.invoke.return_value = MagicMock(content="汇总结果")
+        mock_llm.invoke.side_effect = [
+            IndexError("list index out of range"),
+            MagicMock(content="重试成功"),
+        ]
         mock_get_llm.return_value = mock_llm
+        result = deliver_node({"intent_type": "chat", "plan": ["deliver"], "errors": [], "raw_message": "你好"})
+        self.assertEqual(result["summary"], "重试成功")
+        self.assertEqual(mock_llm.invoke.call_count, 2)
+
+    @patch("im_copilot.graph.nodes.deliver_node.get_llm_for_node")
+    def test_deliver_chat_invalid_llm_response_after_retry(self, mock_get_llm):
+        mock_llm = MockLLM()
+        mock_llm.invoke.side_effect = IndexError("list index out of range")
+        mock_get_llm.return_value = mock_llm
+        result = deliver_node({"intent_type": "chat", "plan": ["deliver"], "errors": [], "raw_message": "你好"})
+        self.assertEqual(result["summary"], "抱歉，模型这次没有返回有效内容，请稍后再试。")
+        self.assertEqual(mock_llm.invoke.call_count, 2)
+
+    @patch("im_copilot.graph.nodes.deliver_node.get_llm_for_node")
+    def test_deliver_artifacts(self, mock_get_llm):
         result = deliver_node(
             {
                 "intent_type": "create_multi",
@@ -134,7 +193,8 @@ class DeliverNodeTests(unittest.TestCase):
                 "raw_message": "测试",
             }
         )
-        self.assertEqual(result["summary"], "汇总结果")
+        mock_get_llm.assert_not_called()
+        self.assertEqual(result["summary"], "已完成。\n- Mock doc：已创建\n- Mock slide：已创建")
 
 
 class VerifyNodeTests(unittest.TestCase):
