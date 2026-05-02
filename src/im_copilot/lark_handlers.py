@@ -154,6 +154,16 @@ def _extract_rich_text(value: Any) -> str:
     return ""
 
 
+def _replace_mentions(text: str, mentions: list[dict[str, Any]]) -> str:
+    result = text
+    for mention in mentions:
+        key = str(mention.get("key") or "").strip()
+        name = str(mention.get("name") or "").strip()
+        if key and name:
+            result = result.replace(key, f"@{name}")
+    return result
+
+
 def _make_thread_id(chat_id: str, message_id: str | None = None) -> str:
     with _chat_generation_lock:
         gen = _chat_generation.get(chat_id)
@@ -544,6 +554,7 @@ def _process_message(
                     "message_id": message_id,
                     "source_open_id": open_id,
                     "user_id": open_id,
+                    "mentions": mentions,
                 },
             )
             extract_and_store_todos(
@@ -684,12 +695,12 @@ def on_message_receive(data: P2ImMessageReceiveV1, lark_bot: LarkBot) -> None:
 
     message = data.event.message
     content_raw = message.content or "{}"
-    text = _extract_text_content(content_raw)
 
     chat_id = message.chat_id or ""
     message_id = message.message_id or ""
     chat_type = message.chat_type or ""
     mentions = _mention_dicts(message)
+    text = _replace_mentions(_extract_text_content(content_raw), mentions)
     open_id = ""
     sender_type = ""
     if data.event.sender and data.event.sender.sender_id:
@@ -705,12 +716,14 @@ def on_message_receive(data: P2ImMessageReceiveV1, lark_bot: LarkBot) -> None:
         logger.error("Missing chat_id in message event")
         return
 
-    ack_worker = threading.Thread(
-        target=_ack_message,
-        args=(lark_bot, message_id),
-        daemon=True,
-    )
-    ack_worker.start()
+    is_group = (chat_type or "").lower() not in {"", "p2p", "private"}
+    if not is_group or _mentions_bot(text, mentions):
+        ack_worker = threading.Thread(
+            target=_ack_message,
+            args=(lark_bot, message_id),
+            daemon=True,
+        )
+        ack_worker.start()
 
     worker = threading.Thread(
         target=_process_message,

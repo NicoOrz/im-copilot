@@ -127,6 +127,7 @@ def _process_history_message(lark_bot: LarkBot, message: dict[str, Any]) -> bool
         return False
 
     text = _extract_text_content(str(message.get("content") or ""))
+    text = _replace_mentions(text, mentions)
     if not text.strip():
         return False
     if text.strip().startswith("/"):
@@ -147,6 +148,7 @@ def _process_history_message(lark_bot: LarkBot, message: dict[str, Any]) -> bool
             "message_id": message_id,
             "source_open_id": source_open_id,
             "user_id": source_open_id,
+            "mentions": mentions,
         },
     )
     extract_and_store_todos(
@@ -181,6 +183,18 @@ def _mentions_bot(mentions: list[Any]) -> bool:
         if isinstance(mention, dict) and mention.get("open_id") == bot_open_id:
             return True
     return False
+
+
+def _replace_mentions(text: str, mentions: list[Any]) -> str:
+    result = text
+    for mention in mentions:
+        if not isinstance(mention, dict):
+            continue
+        key = str(mention.get("key") or "").strip()
+        name = str(mention.get("name") or "").strip()
+        if key and name:
+            result = result.replace(key, f"@{name}")
+    return result
 
 
 def _extract_text_content(content: str) -> str:
