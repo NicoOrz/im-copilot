@@ -9,8 +9,8 @@ from im_copilot.deep_agent.events import record_event
 from im_copilot.memory.todo_store import TodoRecord, todo_store
 
 _TZ = ZoneInfo("Asia/Hong_Kong")
-_TIME_RE = re.compile(r"(?:(明天|明日|今天|今日|后天)|(\d{1,2})月(\d{1,2})日)(早上|上午|中午|下午|晚上|晚间)?(?:(\d{1,2})点)?")
-_ACTION_RE = re.compile(r"(把|将|负责|完成|提交|交付|发送|整理|评审|确认|更新|发给|交到)")
+_TIME_RE = re.compile(r"(?:(今晚下班|今天下班|下班前|下班|今晚|明天|明日|今天|今日|后天)|(\d{1,2})月(\d{1,2})日)(早上|上午|中午|下午|晚上|晚间)?(?:(\d{1,2})点)?")
+_ACTION_RE = re.compile(r"(把|将|负责|完成|提交|交付|发送|整理|评审|确认|更新|发给|交到|记得|提醒|带|拿)")
 
 
 @dataclass
@@ -166,8 +166,15 @@ def _parse_time(text: str, now: datetime) -> tuple[datetime | None, datetime | N
         if base.date() < now.date():
             base = base.replace(year=year + 1)
 
-    has_time = bool(period or hour_text)
-    hour = _hour(period, hour_text, has_time)
+    after_work = relative in {"今晚下班", "今天下班", "下班前", "下班"}
+    tonight = relative == "今晚"
+    has_time = bool(period or hour_text or after_work or tonight)
+    if after_work:
+        hour = 18
+    elif tonight:
+        hour = 20
+    else:
+        hour = _hour(period, hour_text, has_time)
     due_at = base.replace(hour=hour, minute=0, second=0, microsecond=0)
     if has_time:
         remind_at = due_at - timedelta(minutes=10)

@@ -94,12 +94,25 @@ def _start_lark_bot_thread() -> threading.Thread | None:
             domain=os.getenv("LARK_DOMAIN", lark.FEISHU_DOMAIN),
             debug=os.getenv("LARK_BOT_DEBUG") == "1",
         )
+        if os.getenv("LARK_GROUP_HISTORY_ENABLED") == "1":
+            from im_copilot.memory.group_history_worker import start_group_history_loop
+
+            start_group_history_loop(
+                bot,
+                interval_seconds=_env_int("LARK_GROUP_HISTORY_POLL_SECONDS", 60),
+                lookback_seconds=_env_int("LARK_GROUP_HISTORY_LOOKBACK_SECONDS", 300),
+            )
         handler = build_event_handler(bot)
         bot.start_ws(handler)
 
     t = threading.Thread(target=_run, daemon=True, name="lark-ws")
     t.start()
     return t
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.getenv(name, "")
+    return int(value) if value.isdigit() else default
 
 
 @asynccontextmanager

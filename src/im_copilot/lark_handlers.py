@@ -23,6 +23,9 @@ from functools import partial
 from typing import Any
 
 import lark_oapi as lark
+from lark_oapi.api.im.v1.model.p2_im_chat_member_bot_added_v1 import (
+    P2ImChatMemberBotAddedV1,
+)
 from lark_oapi.api.im.v1.model.p2_im_message_receive_v1 import P2ImMessageReceiveV1
 from lark_oapi.api.im.v1.model.p2_im_message_message_read_v1 import (
     P2ImMessageMessageReadV1,
@@ -908,6 +911,25 @@ def on_message_reaction_deleted(data: P2ImMessageReactionDeletedV1) -> None:
     return None
 
 
+def on_bot_added_to_chat(data: P2ImChatMemberBotAddedV1) -> None:
+    """Record group chats when the bot is added."""
+    if data.event is None:
+        logger.error("Invalid bot-added event: missing event")
+        return
+    chat_id = data.event.chat_id or ""
+    if not chat_id:
+        logger.error("Invalid bot-added event: missing chat_id")
+        return
+    from im_copilot.memory.group_history_worker import record_bot_joined_group
+
+    record_bot_joined_group(
+        chat_id,
+        name=data.event.name or "",
+        external=bool(data.event.external),
+        tenant_key=data.event.operator_tenant_key or "",
+    )
+
+
 def build_event_handler(lark_bot: LarkBot) -> lark.EventDispatcherHandler:
     """Build and return a ``lark.EventDispatcherHandler`` with both handlers
     registered.
@@ -931,6 +953,7 @@ def build_event_handler(lark_bot: LarkBot) -> lark.EventDispatcherHandler:
         .register_p2_im_message_message_read_v1(on_message_read)
         .register_p2_im_message_reaction_created_v1(on_message_reaction_created)
         .register_p2_im_message_reaction_deleted_v1(on_message_reaction_deleted)
+        .register_p2_im_chat_member_bot_added_v1(on_bot_added_to_chat)
         .register_p2_card_action_trigger(
             partial(on_card_action, lark_bot=lark_bot)
         )

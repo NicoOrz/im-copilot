@@ -23,6 +23,8 @@ from lark_oapi.api.im.v1 import (
     CreateMessageRequestBodyBuilder,
     CreateMessageRequestBuilder,
     EmojiBuilder,
+    ListChatRequestBuilder,
+    ListMessageRequestBuilder,
     PatchMessageRequestBodyBuilder,
     PatchMessageRequestBuilder,
     ReplyMessageRequestBodyBuilder,
@@ -32,6 +34,29 @@ from lark_oapi.core.exception import ObtainAccessTokenException
 from lark_oapi.core.token import TokenManager
 
 logger = logging.getLogger(__name__)
+
+
+def _message_to_dict(message: Any) -> dict[str, Any]:
+    sender = getattr(message, "sender", None)
+    body = getattr(message, "body", None)
+    mentions = []
+    for mention in getattr(message, "mentions", None) or []:
+        mentions.append({
+            "key": getattr(mention, "key", "") or "",
+            "open_id": getattr(mention, "id", "") or "",
+            "name": getattr(mention, "name", "") or "",
+        })
+    return {
+        "message_id": getattr(message, "message_id", "") or "",
+        "chat_id": getattr(message, "chat_id", "") or "",
+        "msg_type": getattr(message, "msg_type", "") or "",
+        "create_time": int(getattr(message, "create_time", 0) or 0),
+        "deleted": bool(getattr(message, "deleted", False)),
+        "sender_id": getattr(sender, "id", "") if sender else "",
+        "sender_type": getattr(sender, "sender_type", "") if sender else "",
+        "content": getattr(body, "content", "") if body else "",
+        "mentions": mentions,
+    }
 
 
 class LarkBot:
@@ -111,6 +136,92 @@ class LarkBot:
     # --------------------------------------------------------------------- #
     # Messaging
     # --------------------------------------------------------------------- #
+
+    def list_bot_chats(self) -> list[dict[str, Any]]:
+        """List group chats where the bot is present."""
+        logger.debug("list_bot_chats start")
+        chats: list[dict[str, Any]] = []
+        page_token = ""
+        while True:
+            builder = (
+                ListChatRequestBuilder()
+                .sort_type("ByCreateTimeAsc")
+                .page_size(100)
+            )
+            if page_token:
+                builder.page_token(page_token)
+            try:
+                resp = self._client.im.v1.chat.list(builder.build())
+            except ObtainAccessTokenException as exc:
+                logger.error("list_bot_chats auth error: %s", exc)
+                return chats
+            except Exception:
+                logger.exception("list_bot_chats unexpected error")
+                return chats
+            if not resp.success():
+                logger.error("list_bot_chats failed: code=%s msg=%s", resp.code, resp.msg)
+                return chats
+            data = resp.data
+            for item in getattr(data, "items", None) or []:
+                chats.append({
+                    "chat_id": getattr(item, "chat_id", "") or "",
+                    "name": getattr(item, "name", "") or "",
+                    "status": getattr(item, "chat_status", "") or "normal",
+                    "external": bool(getattr(item, "external", False)),
+                    "tenant_key": getattr(item, "tenant_key", "") or "",
+                })
+            if not getattr(data, "has_more", False):
+                break
+            page_token = getattr(data, "page_token", "") or ""
+            if not page_token:
+                break
+        logger.info("list_bot_chats success: count=%s", len(chats))
+        return chats
+
+    def list_chat_messages(
+        self,
+        chat_id: str,
+        *,
+        start_time: int,
+        end_time: int,
+    ) -> list[dict[str, Any]]:
+        """List chat history messages for a time range in seconds."""
+        logger.debug("list_chat_messages start: chat_id=%s start=%s end=%s", chat_id, start_time, end_time)
+        messages: list[dict[str, Any]] = []
+        page_token = ""
+        while True:
+            builder = (
+                ListMessageRequestBuilder()
+                .container_id_type("chat")
+                .container_id(chat_id)
+                .start_time(str(start_time))
+                .end_time(str(end_time))
+                .sort_type("ByCreateTimeAsc")
+                .page_size(50)
+            )
+            if page_token:
+                builder.page_token(page_token)
+            try:
+                resp = self._client.im.v1.message.list(builder.build())
+            except ObtainAccessTokenException as exc:
+                logger.error("list_chat_messages auth error: chat_id=%s error=%s", chat_id, exc)
+                return messages
+            except Exception:
+                logger.exception("list_chat_messages unexpected error: chat_id=%s", chat_id)
+                return messages
+            if not resp.success():
+                logger.error("list_chat_messages failed: code=%s msg=%s chat_id=%s", resp.code, resp.msg, chat_id)
+                return messages
+            data = resp.data
+            for item in getattr(data, "items", None) or []:
+                messages.append(_message_to_dict(item))
+            if not getattr(data, "has_more", False):
+                break
+            page_token = getattr(data, "page_token", "") or ""
+            if not page_token:
+                break
+        logger.info("list_chat_messages success: chat_id=%s count=%s", chat_id, len(messages))
+        return messages
 
     def send_text(self, chat_id: str, text: str) -> dict[str, Any]:
         """Send a plain text message to a chat.
