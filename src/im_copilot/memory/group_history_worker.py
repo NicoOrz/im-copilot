@@ -96,6 +96,10 @@ def poll_known_chats(lark_bot: LarkBot, *, lookback_seconds: int) -> int:
             start_time=start_sec,
             end_time=now_sec,
         )
+        if _chat_unavailable(getattr(lark_bot, "last_list_chat_messages_error", None)):
+            group_chat_store.mark_inactive(chat.chat_id)
+            logger.info("group_history chat marked inactive: chat_id=%s", chat.chat_id)
+            continue
         max_seen_ms = start_ms
         for message in messages:
             create_time = int(message.get("create_time") or 0)
@@ -109,6 +113,14 @@ def poll_known_chats(lark_bot: LarkBot, *, lookback_seconds: int) -> int:
     if processed:
         logger.info("group_history processed messages: count=%s", processed)
     return processed
+
+
+def _chat_unavailable(error: Any) -> bool:
+    if not isinstance(error, dict):
+        return False
+    code = error.get("code")
+    msg = str(error.get("msg") or "")
+    return code == 230002 or "out of the chat" in msg or "NOT be out of the chat" in msg
 
 
 def _process_history_message(lark_bot: LarkBot, message: dict[str, Any]) -> bool:

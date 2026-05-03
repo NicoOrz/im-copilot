@@ -167,6 +167,49 @@ class GroupBoardStore:
             row = conn.execute("SELECT * FROM group_board_items WHERE id = ?", (item_id,)).fetchone()
         return _row_to_item(row) if row else None
 
+    def update_item(
+        self,
+        item_id: int,
+        *,
+        title: str | None = None,
+        owner_open_id: str | None = None,
+        owner_name: str | None = None,
+        due_at: str | None = None,
+        status: BoardItemStatus | None = None,
+        source_text: str | None = None,
+        metadata_json: str | None = None,
+    ) -> GroupBoardItem | None:
+        updates: list[str] = []
+        params: list[object] = []
+        values = {
+            "title": title,
+            "owner_open_id": owner_open_id,
+            "owner_name": owner_name,
+            "due_at": due_at,
+            "status": status,
+            "source_text": source_text,
+            "metadata_json": metadata_json,
+        }
+        for key, value in values.items():
+            if value is None:
+                continue
+            updates.append(f"{key} = ?")
+            params.append(value)
+        if not updates:
+            return self.get(item_id)
+        updates.append("updated_at = ?")
+        params.append(time.time())
+        params.append(item_id)
+        with _conn() as conn:
+            cursor = conn.execute(
+                f"UPDATE group_board_items SET {', '.join(updates)} WHERE id = ?",
+                params,
+            )
+            if cursor.rowcount == 0:
+                return None
+            row = conn.execute("SELECT * FROM group_board_items WHERE id = ?", (item_id,)).fetchone()
+        return _row_to_item(row) if row else None
+
 
 def _row_to_item(row: sqlite3.Row) -> GroupBoardItem:
     return GroupBoardItem(

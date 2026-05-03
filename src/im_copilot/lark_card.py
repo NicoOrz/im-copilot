@@ -96,6 +96,29 @@ def create_progress_card(title: str = "正在处理...") -> dict:
     return card
 
 
+def create_command_response_card(text: str, title: str = "命令结果") -> dict:
+    card = _base_card()
+    card["header"] = {
+        "title": {
+            "tag": "plain_text",
+            "content": title,
+        },
+        "template": "blue",
+        "padding": "12px 12px 12px 12px",
+    }
+    card["body"]["elements"] = [
+        {
+            "tag": "markdown",
+            "element_id": "command_result_md",
+            "content": text,
+            "text_align": "left",
+            "text_size": "normal_v2",
+            "margin": "0px 0px 0px 0px",
+        }
+    ]
+    return card
+
+
 def create_approval_card(
     plan: list[str],
     intent_type: str,
@@ -321,7 +344,7 @@ def create_meeting_confirmation_card(
     attendee_ids: list[str],
 ) -> dict:
     time_text = f"{start} ~ {end}" if start and end else "时间待确认"
-    attendees_text = "、".join(attendee_ids) if attendee_ids else "仅创建者"
+    attendees_text = "、".join(_at_tag(item) for item in attendee_ids) if attendee_ids else "仅创建者"
     content = (
         f"**会议事项:** {title}\n\n"
         f"**时间:** {time_text}\n\n"
@@ -387,3 +410,7 @@ def create_meeting_confirmation_card(
         },
     ]
     return card
+
+
+def _at_tag(open_id: str) -> str:
+    return f"<at id={open_id}></at>"

@@ -23,6 +23,7 @@ from functools import partial
 from typing import Any
 
 import lark_oapi as lark
+from pydantic import BaseModel
 from lark_oapi.api.im.v1.model.p2_im_chat_member_bot_added_v1 import (
     P2ImChatMemberBotAddedV1,
 )
@@ -44,15 +45,18 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
 
 from im_copilot.deep_agent.events import record_event
 from im_copilot.deep_agent.service import run_agent
+from im_copilot.llm import invoke_structured
 from im_copilot.lark_bot import LarkBot
 from im_copilot.lark_card import (
     create_approval_card,
     create_clarification_card,
+    create_command_response_card,
     create_meeting_confirmation_card,
     create_progress_card,
     create_result_card,
     create_streaming_card,
 )
+from im_copilot.oauth_scopes import user_oauth_scope_string
 from im_copilot.session_manager import session_manager
 from im_copilot.user_session_store import session_store as user_session_store
 from im_copilot.user_token_store import token_store
@@ -229,6 +233,11 @@ _reminder_started = False
 _reminder_lock = threading.Lock()
 
 
+class BoardQueryIntent(BaseModel):
+    is_board_query: bool = False
+    reason: str = ""
+
+
 def _is_interrupt_update(step: dict[str, Any]) -> bool:
     """Check whether a stream step represents an ``__interrupt__`` update."""
     return "__interrupt__" in step
@@ -403,23 +412,13 @@ def _send_oauth_prompt(lark_bot: LarkBot, chat_id: str, open_id: str) -> None:
     """Send an OAuth authorization link to the user."""
     app_id = os.environ.get("FEISHU_APP_ID") or os.environ.get("LARK_APP_ID", "")
     callback_url = os.environ.get("OAUTH_CALLBACK_URL", "")
-    scopes = " ".join([
-        "offline_access",
-        "docx:document",
-        "drive:drive",
-        "slides:presentation:read",
-        "slides:presentation:create",
-        "slides:presentation:write_only",
-        "slides:presentation:update",
-        "wiki:wiki",
-    ])
     import urllib.parse
     auth_url = (
         "https://accounts.feishu.cn/open-apis/authen/v1/authorize"
         f"?app_id={urllib.parse.quote(app_id)}"
         f"&redirect_uri={urllib.parse.quote(callback_url)}"
         f"&response_type=code"
-        f"&scope={urllib.parse.quote(scopes)}"
+        f"&scope={urllib.parse.quote(user_oauth_scope_string())}"
         f"&state={urllib.parse.quote(open_id)}"
     )
     lark_bot.send_text(
@@ -471,14 +470,55 @@ def _reply_result(lark_bot: LarkBot, message_id: str, result: Any) -> None:
     lark_bot.reply_text(message_id, text)
 
 
+def _send_private_group_command_response(
+    lark_bot: LarkBot,
+    *,
+    chat_id: str,
+    open_id: str,
+    text: str,
+    command: str,
+    title: str = "命令结果",
+) -> bool:
+    if not open_id:
+        record_event(
+            chat_id,
+            "feishu",
+            "error",
+            {"error": "missing command sender open_id", "command": command},
+        )
+        return False
+    resp = lark_bot.send_ephemeral_card(
+        chat_id,
+        open_id,
+        create_command_response_card(text, title=title),
+    )
+    if resp.get("code") == 0:
+        return True
+    record_event(
+        chat_id,
+        "feishu",
+        "error",
+        {
+            "error": "command ephemeral card send failed",
+            "command": command,
+            "open_id": open_id,
+            "response": resp,
+        },
+    )
+    return False
+
+
 def _send_meeting_confirmation_cards(lark_bot: LarkBot, items: list[Any], recipients: list[str]) -> None:
-    if not items or not recipients:
+    if not items:
         return
     meeting_items = [item for item in items if getattr(item, "item_type", "") == "meeting"]
     if not meeting_items:
         return
     item = meeting_items[-1]
     metadata = _json_dict(getattr(item, "metadata_json", ""))
+    recipients = _json_list(metadata.get("recipients")) or _json_list(recipients)
+    if not recipients:
+        return
     start = str(metadata.get("start") or getattr(item, "due_at", "") or "")
     end = str(metadata.get("end") or "")
     card = create_meeting_confirmation_card(
@@ -490,7 +530,19 @@ def _send_meeting_confirmation_cards(lark_bot: LarkBot, items: list[Any], recipi
         attendee_ids=recipients,
     )
     for open_id in recipients:
-        lark_bot.send_card_to_open_id(open_id, card)
+        resp = lark_bot.send_ephemeral_card(str(item.chat_id), open_id, card)
+        if resp.get("code") != 0:
+            record_event(
+                str(item.chat_id),
+                "feishu",
+                "error",
+                {
+                    "error": "meeting ephemeral card send failed",
+                    "board_item_id": int(item.id),
+                    "open_id": open_id,
+                    "response": resp,
+                },
+            )
 
 
 def _json_dict(text: str) -> dict[str, Any]:
@@ -499,6 +551,30 @@ def _json_dict(text: str) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return value if isinstance(value, dict) else {}
+
+
+def _command_response_title(command: str, args: str) -> str:
+    if command == "todo" and args.strip().lower() == "board":
+        return "今日群看板"
+    return "命令结果"
+
+
+def _is_board_query(text: str) -> bool:
+    clean = _AT_MENTION_RE.sub("", text or "").strip()
+    if not clean:
+        return False
+    prompt = (
+        "判断用户是否在群聊中向机器人查询今日群看板、群任务、今日待办或群聊总结。\n"
+        "只判断查询意图，不处理创建任务、安排会议、普通聊天或业务执行请求。\n"
+        "输出结构化结果。\n\n"
+        f"用户消息：{clean}"
+    )
+    try:
+        result = invoke_structured("group_board_query_intent", BoardQueryIntent, prompt, timeout=15, max_retries=1)
+    except Exception as exc:
+        logger.warning("board query intent LLM failed: %s", exc)
+        return False
+    return bool(result.is_board_query)
 
 
 def _process_message(
@@ -592,12 +668,39 @@ def _process_message(
             cmd_result = execute_command(cmd_name, cmd_args, chat_id, thread_id, source=command_source, user_id=open_id)
             if cmd_result.metadata.get("action") == "reset_thread":
                 _reset_chat_thread(chat_id)
-            lark_bot.reply_text(message_id, cmd_result.response_text)
+            if is_group:
+                _send_private_group_command_response(
+                    lark_bot,
+                    chat_id=chat_id,
+                    open_id=open_id,
+                    text=cmd_result.response_text,
+                    command=cmd_name,
+                    title=_command_response_title(cmd_name, cmd_args),
+                )
+            else:
+                lark_bot.reply_text(message_id, cmd_result.response_text)
             _complete_message(lark_bot, message_id)
         except Exception as exc:
             logger.exception("Command error for thread_id=%s", thread_id)
             _fail_message(lark_bot, message_id)
-            lark_bot.send_text(chat_id, f"处理出错：{exc}")
+            error_text = f"处理出错：{exc}"
+            if is_group:
+                _send_private_group_command_response(
+                    lark_bot,
+                    chat_id=chat_id,
+                    open_id=open_id,
+                    text=error_text,
+                    command=cmd_name,
+                )
+            else:
+                lark_bot.send_text(chat_id, error_text)
+        return
+
+    if is_group and is_mentioned and _is_board_query(clean_text):
+        from im_copilot.memory.summary_worker import summary_today
+
+        lark_bot.reply_text(message_id, summary_today(chat_id))
+        _complete_message(lark_bot, message_id)
         return
 
     thread_id = _make_thread_id(chat_id)
@@ -781,7 +884,11 @@ def _handle_group_meeting_card_action(
         lark_bot.send_text_to_open_id(operator_open_id, "创建日程需要先完成授权，请在单聊里发送任意消息并按提示授权。")
         return "需要先授权。"
 
-    attendee_ids = [operator_open_id, *_json_list(metadata.get("recipients"))]
+    attendee_ids = [
+        attendee_id
+        for attendee_id in _json_list(metadata.get("recipients"))
+        if attendee_id != operator_open_id
+    ]
     result = create_calendar_event(
         summary=_calendar_summary(item.title),
         start=start,

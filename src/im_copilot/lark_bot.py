@@ -91,6 +91,7 @@ class LarkBot:
         self._verification_token = verification_token or ""
         self._domain = domain.rstrip("/")
         self._debug = debug
+        self.last_list_chat_messages_error: dict[str, Any] | None = None
 
         self._client = (
             lark.Client.builder()
@@ -187,6 +188,7 @@ class LarkBot:
     ) -> list[dict[str, Any]]:
         """List chat history messages for a time range in seconds."""
         logger.debug("list_chat_messages start: chat_id=%s start=%s end=%s", chat_id, start_time, end_time)
+        self.last_list_chat_messages_error = None
         messages: list[dict[str, Any]] = []
         page_token = ""
         while True:
@@ -205,12 +207,15 @@ class LarkBot:
                 resp = self._client.im.v1.message.list(builder.build())
             except ObtainAccessTokenException as exc:
                 logger.error("list_chat_messages auth error: chat_id=%s error=%s", chat_id, exc)
+                self.last_list_chat_messages_error = {"code": exc.code, "msg": str(exc), "chat_id": chat_id}
                 return messages
-            except Exception:
+            except Exception as exc:
                 logger.exception("list_chat_messages unexpected error: chat_id=%s", chat_id)
+                self.last_list_chat_messages_error = {"code": -1, "msg": str(exc), "chat_id": chat_id}
                 return messages
             if not resp.success():
                 logger.error("list_chat_messages failed: code=%s msg=%s chat_id=%s", resp.code, resp.msg, chat_id)
+                self.last_list_chat_messages_error = {"code": resp.code, "msg": resp.msg, "chat_id": chat_id}
                 return messages
             data = resp.data
             for item in getattr(data, "items", None) or []:
@@ -485,6 +490,56 @@ class LarkBot:
             return {"code": exc.code, "msg": str(exc), "data": None}
         except Exception as exc:
             logger.exception("send_card_to_open_id unexpected error: open_id=%s", open_id)
+            return {"code": -1, "msg": str(exc), "data": None}
+
+    def send_ephemeral_card(
+        self,
+        chat_id: str,
+        open_id: str,
+        card_json: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Send an interactive card visible only to one user in a group chat."""
+        logger.debug(
+            "send_ephemeral_card start: chat_id=%s open_id=%s card_keys=%s",
+            chat_id,
+            open_id,
+            list(card_json.keys()),
+        )
+        try:
+            token = self._get_tenant_access_token()
+            url = f"{self._domain}/open-apis/ephemeral/v1/send"
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json; charset=utf-8",
+            }
+            payload = {
+                "chat_id": chat_id,
+                "open_id": open_id,
+                "msg_type": "interactive",
+                "card": card_json,
+            }
+            response = requests.post(url, headers=headers, json=payload, timeout=30)
+            response.raise_for_status()
+            result = response.json()
+            if result.get("code") != 0:
+                logger.error(
+                    "send_ephemeral_card failed: code=%s msg=%s chat_id=%s open_id=%s",
+                    result.get("code"),
+                    result.get("msg"),
+                    chat_id,
+                    open_id,
+                )
+            else:
+                logger.info("send_ephemeral_card success: chat_id=%s open_id=%s", chat_id, open_id)
+            return result
+        except requests.HTTPError as exc:
+            logger.error("send_ephemeral_card HTTP error: %s chat_id=%s open_id=%s", exc, chat_id, open_id)
+            return {"code": exc.response.status_code, "msg": str(exc), "data": None}
+        except ObtainAccessTokenException as exc:
+            logger.error("send_ephemeral_card auth error: %s", exc)
+            return {"code": exc.code, "msg": str(exc), "data": None}
+        except Exception as exc:
+            logger.exception("send_ephemeral_card unexpected error: chat_id=%s open_id=%s", chat_id, open_id)
             return {"code": -1, "msg": str(exc), "data": None}
 
     def reply_card(self, message_id: str, card_json: dict[str, Any]) -> dict[str, Any]:

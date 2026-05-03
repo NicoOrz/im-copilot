@@ -111,6 +111,16 @@ class GroupChatStore:
                 (last_message_create_time_ms, now, chat_id),
             )
 
+    def mark_inactive(self, chat_id: str, status: str = "removed") -> None:
+        if not chat_id:
+            return
+        now = time.time()
+        with _conn() as conn:
+            conn.execute(
+                "UPDATE group_chats SET status = ?, updated_at = ? WHERE chat_id = ?",
+                (status, now, chat_id),
+            )
+
 
 def _row_to_chat(row: sqlite3.Row) -> GroupChat:
     return GroupChat(

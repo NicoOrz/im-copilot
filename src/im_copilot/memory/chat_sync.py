@@ -15,12 +15,14 @@ def sync_today(chat_id: str) -> int:
     count = 0
     for event in iter_user_messages_for_chat(chat_id, start):
         payload = event.get("payload", {})
+        mentions = list(payload.get("mentions") or [])
         records = extract_and_store_todos(
             str(payload.get("text") or ""),
             chat_id=chat_id,
             message_id=str(payload.get("message_id") or event.get("id")),
             source_open_id=str(payload.get("source_open_id") or payload.get("user_id") or ""),
             source=str(event.get("source") or "feishu"),
+            mentions=mentions,
         )
         board = extract_and_store_group_board_items(
             str(payload.get("text") or ""),
@@ -28,6 +30,7 @@ def sync_today(chat_id: str) -> int:
             message_id=str(payload.get("message_id") or event.get("id")),
             source_open_id=str(payload.get("source_open_id") or payload.get("user_id") or ""),
             source=str(event.get("source") or "feishu"),
+            mentions=mentions,
         )
         count += len(records) + len(board.items)
     return count

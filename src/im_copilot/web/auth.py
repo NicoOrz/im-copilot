@@ -12,21 +12,11 @@ from fastapi import Request
 from fastapi.responses import RedirectResponse
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 
+from im_copilot.oauth_scopes import user_oauth_scope_string
+
 
 _FEISHU_AUTHORIZE_URL = "https://accounts.feishu.cn/open-apis/authen/v1/authorize"
 _FEISHU_USER_INFO_URL = "https://open.feishu.cn/open-apis/authen/v1/user_info"
-
-_WEB_OAUTH_SCOPES = " ".join([
-    "offline_access",
-    "contact:user.base:readonly",
-    "docx:document",
-    "drive:drive",
-    "slides:presentation:read",
-    "slides:presentation:create",
-    "slides:presentation:write_only",
-    "slides:presentation:update",
-    "wiki:wiki",
-])
 
 _LOGIN_EXEMPT_PATHS = frozenset({"/login", "/logout", "/oauth/callback", "/static"})
 _OAUTH_STATE_MAX_AGE_SECONDS = 10 * 60
@@ -68,7 +58,7 @@ def login_redirect_url(request: Request | None = None) -> str:
         f"?app_id={urllib.parse.quote(app_id)}"
         f"&redirect_uri={urllib.parse.quote(callback_url)}"
         f"&response_type=code"
-        f"&scope={urllib.parse.quote(_WEB_OAUTH_SCOPES)}"
+        f"&scope={urllib.parse.quote(user_oauth_scope_string())}"
         f"&state={urllib.parse.quote(state)}"
     )
 

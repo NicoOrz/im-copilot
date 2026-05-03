@@ -69,6 +69,11 @@ class UserTokenStore:
             )
         logger.info("Saved token for open_id=%s expires_at=%d", open_id, expires_at)
 
+    def delete(self, open_id: str) -> bool:
+        with _conn() as c:
+            cursor = c.execute("DELETE FROM user_tokens WHERE open_id = ?", (open_id,))
+            return cursor.rowcount > 0
+
     def _refresh(self, open_id: str, refresh_token: str | None) -> str | None:
         if not refresh_token:
             logger.warning("No refresh_token for open_id=%s, re-auth required", open_id)
