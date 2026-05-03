@@ -9,7 +9,7 @@
 
 1. **EOD 自动总结**：每天下班前自动向活跃群发送全天看板总结 + 明日待办预告，无需用户主动 @bot 查询。
 2. **Proactive Worker**：在群聊沉默一段时间后，LLM 判断讨论是否有值得主动介入的场景（总结结论、澄清盲点、推荐下一步），若有则主动发群消息。
-3. **产物建议卡片**：EOD 总结或看板查询时，若会议材料成熟，附上卡片按钮供用户一键触发生成 PRD 或 PPT。
+3. **产物建议卡片**：EOD 总结或看板查询时，若会议材料成熟，附上卡片按钮供用户一键触发生成文稿、画板或 PPT。
 
 子系统 B（看板事项跨天沉淀）本次不做。
 
@@ -88,7 +88,7 @@ class ChatProactiveState:
 
 对每个活跃群：
   if now - last_message_ts >= SILENCE_WINDOW and not triggered:
-    取最近 20 条群消息（过滤 bot 消息）
+    取最近 2 小时内、最多 60 条群消息（过滤 bot 消息）
     调用 LLM 判断 ProactiveDecision
     if decision.should_act:
       lark_bot.send_text(chat_id, decision.message)
@@ -132,6 +132,8 @@ def notify_new_messages(chat_id: str, latest_ts: float) -> None:
 
 - `LARK_PROACTIVE_ENABLED`：`1` 启用，默认关闭
 - `LARK_PROACTIVE_SILENCE_MINUTES`：沉默窗口分钟数，默认 `10`
+- `LARK_PROACTIVE_CONTEXT_HOURS`：消息上下文时间窗口（小时），默认 `2`
+- `LARK_PROACTIVE_CONTEXT_LIMIT`：消息上下文条数上限，默认 `60`
 
 ### 启动
 
@@ -139,11 +141,11 @@ def notify_new_messages(chat_id: str, latest_ts: float) -> None:
 
 ---
 
-## 子系统 D：会议材料成熟时建议生成 PRD/PPT
+## 子系统 D：会议材料成熟时建议生成产物
 
 ### 目标
 
-EOD 总结或看板查询时，若检测到有足够的会议材料（已确认会议 + 相关讨论），在消息末尾附上卡片按钮，用户点击后触发 Agent 生成 PRD 或 PPT。
+EOD 总结或看板查询时，若检测到有足够的会议材料（已确认会议 + 相关讨论），在消息末尾附上卡片按钮，用户点击后触发 Agent 生成对应产物。
 
 ### 实现位置
 
@@ -159,8 +161,9 @@ EOD 总结或看板查询时，若检测到有足够的会议材料（已确认�
 
 使用现有 `lark_card.py` 的 `_base_card()` 模式，包含：
 - 标题："会议材料已就绪，建议生成产物"
-- 两个按钮：`生成 PRD` / `生成 PPT`
-- 按钮 action 携带 `chat_id`，触发 `run_agent` 调用
+- 三个按钮：`生成文稿` / `生成画板` / `生成 PPT`
+- 对应 `artifact_type`：`doc` / `whiteboard` / `slide`
+- 按钮 action 携带 `chat_id` 和 `artifact_type`，触发 `run_agent` 调用
 
 ### 卡片交互处理
 
@@ -185,4 +188,4 @@ EOD 总结或看板查询时，若检测到有足够的会议材料（已确认�
 
 1. **EOD Worker**：设置 `LARK_EOD_SUMMARY_ENABLED=1`，将 `LARK_EOD_SUMMARY_TIME` 设为当前时间 +2 分钟，观察群消息是否收到总结；重启后确认不重复发送。
 2. **Proactive Worker**：设置 `LARK_PROACTIVE_ENABLED=1`，`LARK_PROACTIVE_SILENCE_MINUTES=1`，在测试群发几条有讨论内容的消息后等待 1 分钟，观察是否收到主动消息；发一条新消息后再等待，确认重置逻辑正常。
-3. **产物建议卡片**：在测试群确认一个会议事项，触发看板查询，确认卡片出现；点击"生成 PRD"确认 Agent 被触发。
+3. **产物建议卡片**：在测试群确认一个会议事项，触发看板查询，确认卡片出现；分别点击"生成文稿"、"生成画板"、"生成 PPT"确认 Agent 被触发并返回对应产物链接。
