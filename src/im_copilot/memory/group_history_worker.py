@@ -163,7 +163,7 @@ def _process_history_message(lark_bot: LarkBot, message: dict[str, Any]) -> bool
             "mentions": mentions,
         },
     )
-    extract_and_store_todos(
+    todo_records = extract_and_store_todos(
         text,
         chat_id=chat_id,
         message_id=message_id,
@@ -172,6 +172,9 @@ def _process_history_message(lark_bot: LarkBot, message: dict[str, Any]) -> bool
         mentions=mentions,
         is_bot_request=False,
     )
+    if todo_records:
+        from im_copilot.lark_handlers import _send_todo_confirmation_cards
+        _send_todo_confirmation_cards(lark_bot, todo_records, source_open_id=source_open_id)
     board_result = extract_and_store_group_board_items(
         text,
         chat_id=chat_id,

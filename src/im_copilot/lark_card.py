@@ -440,12 +440,13 @@ def create_todo_confirm_card(
         A Feishu CardKit V2 dict with markdown content and confirm/reject buttons.
     """
     assignee_line = f"**负责人：** {assignee_name}\n" if assignee_name else ""
+    source_excerpt = source_text[:100] + "…" if len(source_text) > 100 else source_text
     content = (
         f"**事项：** {title}\n"
         f"**动作：** {action}\n"
         f"**截止时间：** {due_at}\n"
         f"{assignee_line}"
-        f"**来源消息：** {source_text}"
+        f"**来源消息：** {source_excerpt}"
     )
     card = _base_card()
     card["header"] = {

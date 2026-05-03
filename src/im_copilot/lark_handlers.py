@@ -1301,6 +1301,7 @@ def _handle_todo_confirm_action(
     action: str,
     todo_id: int,
     lark_bot: LarkBot,
+    operator_open_id: str = "",
 ) -> "P2CardActionTriggerResponse":
     from im_copilot.memory.todo_store import todo_store
     record = todo_store.get_by_id(todo_id)
@@ -1308,6 +1309,14 @@ def _handle_todo_confirm_action(
         return _make_card_response("待办不存在或已处理。")
     if record.status != "awaiting_confirmation":
         return _make_card_response("该待办已处理。")
+    if operator_open_id and record.assignee_open_id and operator_open_id != record.assignee_open_id:
+        logger.warning(
+            "todo_confirm unauthorized: todo_id=%s operator=%s assignee=%s",
+            todo_id,
+            operator_open_id,
+            record.assignee_open_id,
+        )
+        return _make_card_response("无权操作此待办。")
     if action == "confirm_todo":
         todo_store.update_status(todo_id, "pending")
         logger.info("todo_confirm confirmed: todo_id=%s", todo_id)
@@ -1357,10 +1366,14 @@ def on_card_action(
                 todo_id = int(str(todo_id))
             except (TypeError, ValueError):
                 return _make_card_response("无法识别待办 ID")
+        operator_open_id = ""
+        if data.event.operator:
+            operator_open_id = data.event.operator.open_id or ""
         return _handle_todo_confirm_action(
             action=user_action,
             todo_id=todo_id,
             lark_bot=lark_bot,
+            operator_open_id=operator_open_id,
         )
 
     context = data.event.context
