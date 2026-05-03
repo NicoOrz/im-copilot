@@ -1296,6 +1296,28 @@ def _calendar_summary(title: str) -> str:
     return cleaned[:60] or "会议"
 
 
+def _handle_todo_confirm_action(
+    *,
+    action: str,
+    todo_id: int,
+    lark_bot: LarkBot,
+) -> "P2CardActionTriggerResponse":
+    from im_copilot.memory.todo_store import todo_store
+    record = todo_store.get_by_id(todo_id)
+    if record is None:
+        return _make_card_response("待办不存在或已处理。")
+    if record.status != "awaiting_confirmation":
+        return _make_card_response("该待办已处理。")
+    if action == "confirm_todo":
+        todo_store.update_status(todo_id, "pending")
+        logger.info("todo_confirm confirmed: todo_id=%s", todo_id)
+        return _make_card_response(f"已确认「{record.title}」，将在到期前提醒你。")
+    else:
+        todo_store.update_status(todo_id, "deleted")
+        logger.info("todo_confirm rejected: todo_id=%s", todo_id)
+        return _make_card_response("已忽略。")
+
+
 def on_card_action(
     data: P2CardActionTrigger,
     lark_bot: LarkBot,
@@ -1327,6 +1349,19 @@ def on_card_action(
             lark_bot=lark_bot,
         )
         return _make_card_response(message)
+
+    if user_action in {"confirm_todo", "reject_todo"}:
+        todo_id = action_value.get("todo_id")
+        if not isinstance(todo_id, int):
+            try:
+                todo_id = int(str(todo_id))
+            except (TypeError, ValueError):
+                return _make_card_response("无法识别待办 ID")
+        return _handle_todo_confirm_action(
+            action=user_action,
+            todo_id=todo_id,
+            lark_bot=lark_bot,
+        )
 
     context = data.event.context
     thread_id = action_value.get("thread_id") or (context.open_chat_id if context else "")

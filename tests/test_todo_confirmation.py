@@ -119,3 +119,39 @@ def test_create_todo_confirm_card_structure():
     assert "reject_todo" in actions
     for btn in btn_elements:
         assert btn["behaviors"][0]["value"]["todo_id"] == 42
+
+def test_confirm_todo_action_updates_status(tmp_path, monkeypatch):
+    db = str(tmp_path / "confirm_action.sqlite")
+    monkeypatch.setenv("TODO_DB", db)
+    store = TodoStore()
+
+    record = store.create(
+        chat_id="chat1", message_id="msg_ca", source_open_id="u1",
+        assignee_open_id="u2", title="T_ca", action="A_ca",
+        due_at="2026-05-10T18:00", remind_at="2026-05-10T17:00",
+        source_text="src", status="awaiting_confirmation",
+    )
+    assert record is not None
+
+    ok = store.update_status(record.id, "pending")
+    assert ok is True
+    updated = store.get_by_id(record.id)
+    assert updated.status == "pending"
+
+def test_reject_todo_action_deletes(tmp_path, monkeypatch):
+    db = str(tmp_path / "reject_action.sqlite")
+    monkeypatch.setenv("TODO_DB", db)
+    store = TodoStore()
+
+    record = store.create(
+        chat_id="chat1", message_id="msg_ra", source_open_id="u1",
+        assignee_open_id="u2", title="T_ra", action="A_ra",
+        due_at="2026-05-10T18:00", remind_at="2026-05-10T17:00",
+        source_text="src", status="awaiting_confirmation",
+    )
+    assert record is not None
+
+    ok = store.update_status(record.id, "deleted")
+    assert ok is True
+    updated = store.get_by_id(record.id)
+    assert updated.status == "deleted"
