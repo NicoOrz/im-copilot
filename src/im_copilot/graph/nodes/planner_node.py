@@ -3,7 +3,7 @@ from pydantic import BaseModel, Field
 import os
 
 from im_copilot.graph.nodes.history_utils import format_history
-from im_copilot.llm import get_llm_for_node
+from im_copilot.llm import get_llm_for_node, invoke_structured_with_llm
 from im_copilot.skills.registry import planner_capability_text
 from im_copilot.state import PipelineState
 
@@ -97,7 +97,7 @@ def planner_node(state: PipelineState) -> dict:
         clarification_history=history_text,
         runtime_skills=planner_capability_text(),
     )
-    result: PlannerOutput = get_llm_for_node("planner").with_structured_output(PlannerOutput).invoke(prompt)
+    result = invoke_structured_with_llm(get_llm_for_node("planner"), PlannerOutput, prompt)
 
     if result.needs_clarification and allow_clarification:
         return {

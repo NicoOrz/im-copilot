@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field
 
-from im_copilot.llm import get_llm_for_node
+from im_copilot.llm import get_llm_for_node, invoke_structured_with_llm
 from im_copilot.state import CheckResult, PipelineState
 
 VERIFY_PROMPT = """你是一位严格的内容质量审核员。请审核以下内容是否满足用户需求。
@@ -61,7 +61,7 @@ def verify_node(state: PipelineState) -> dict:
         preview=preview,
     )
 
-    output: VerifyOutput = get_llm_for_node("verify").with_structured_output(VerifyOutput).invoke(prompt)
+    output = invoke_structured_with_llm(get_llm_for_node("verify"), VerifyOutput, prompt)
 
     return {
         "checks": [CheckResult(task=task, status=output.status, reason=output.reason)],

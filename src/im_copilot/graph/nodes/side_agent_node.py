@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field
 
-from im_copilot.llm import get_llm_for_node
+from im_copilot.llm import get_llm_for_node, invoke_structured_with_llm
 from im_copilot.state import PipelineState
 
 SIDE_AGENT_PROMPT = """你是一位并行的质量验证助手。请独立审核以下内容是否满足用户需求。
@@ -66,7 +66,7 @@ def side_agent_node(state: PipelineState) -> dict:
         preview=preview,
     )
 
-    output: SideAgentOutput = get_llm_for_node("side_agent").with_structured_output(SideAgentOutput).invoke(prompt)
+    output = invoke_structured_with_llm(get_llm_for_node("side_agent"), SideAgentOutput, prompt)
 
     return {
         "side_agent_results": [{

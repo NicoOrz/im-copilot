@@ -14,7 +14,7 @@ from im_copilot.deep_agent.doc_agent import (
     generate_doc_content,
 )
 from im_copilot.deep_agent.events import iter_user_messages_for_chat, list_events, record_event
-from im_copilot.llm import get_llm_for_node
+from im_copilot.llm import get_llm_for_node, invoke_structured
 from im_copilot.skills.lark_doc import (
     create_doc_from_content,
     extract_docx_xml_fields,
@@ -688,12 +688,11 @@ def _route_message(message: str, thread_id: str) -> RouteDecision:
         history=history_text or "（无）",
         task_context=task_context,
     )
-    llm = get_llm_for_node("deep_agent_router")
     last_error: Exception | None = None
 
     for attempt in range(2):
         try:
-            decision: RouteDecision = llm.with_structured_output(RouteDecision).invoke(prompt)
+            decision = invoke_structured("deep_agent_router", RouteDecision, prompt)
             decision = _normalize_route_decision(decision)
             decision = _continue_recent_task_if_needed(message, decision, recent_task_state)
             return decision

@@ -3,7 +3,7 @@ import os
 from pydantic import BaseModel, Field
 
 from im_copilot.graph.nodes.history_utils import format_history
-from im_copilot.llm import get_llm_for_node
+from im_copilot.llm import get_llm_for_node, invoke_structured_with_llm
 from im_copilot.state import PipelineState
 
 _CLARIFICATION_THRESHOLD = float(os.getenv("CLARIFICATION_CONFIDENCE_THRESHOLD", "0.7"))
@@ -83,8 +83,7 @@ def intent_node(state: PipelineState) -> dict:
         artifact_context=artifact_context,
         clarification_history=clarification_history,
     )
-    llm = get_llm_for_node("intent").with_structured_output(IntentOutput)
-    result: IntentOutput = llm.invoke(prompt)
+    result = invoke_structured_with_llm(get_llm_for_node("intent"), IntentOutput, prompt)
     intent_type = result.intent_type
 
     plan = getattr(result, "plan", None)
