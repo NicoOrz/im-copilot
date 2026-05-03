@@ -32,6 +32,8 @@ SLIDE_OUTLINE_PROMPT = """你是飞书汇报 PPT 内容规划助手。只输出 
 - 内容页不要堆长段落；每页 bullets 控制在 2 到 5 条。
 - Action 页适合负责人、任务、期限；timeline 页适合里程碑；metrics 页适合数字、目标、百分比、耗时等指标。
 - 不要输出 XML；XML 由代码按飞书 slides 协议渲染。
+- 不得生成空白页；每页必须有明确标题和可见中文内容。
+- 参考内容只作为事实来源；不要把既有产物预览、内部提示文本、XML 或 JSON 结构当作页面内容。
 
 要求：
 - 输出 JSON 对象：{{"style":"business|tech|weekly|fresh","slides":[...]}}
@@ -43,6 +45,7 @@ SLIDE_OUTLINE_PROMPT = """你是飞书汇报 PPT 内容规划助手。只输出 
 - bullets 是 2 到 5 条中文要点
 - metrics 是可选数组，每个元素包含 label、value、note；无指标则为空数组
 - 内容忠实覆盖参考内容，不添加无依据事实
+- title 不得为空；bullets 不能为空
 - 不要输出 XML
 """
 
@@ -78,12 +81,17 @@ def create_slide_from_xml(
     }
     if not user_access_token:
         return result
+    slides_payload, validation_error = _validated_slides_json(slides_xml)
+    if validation_error:
+        result.update({"status": "error", "error": validation_error})
+        logger.error("slide content validation failed: %s", validation_error)
+        return result
 
     try:
         resp = run_lark_cli([
             "slides", "+create",
             "--title", title,
-            "--slides", _slides_json(slides_xml),
+            "--slides", slides_payload,
             "--as", "user",
         ], uat=user_access_token)
         if resp.get("ok") is False or resp.get("error"):
@@ -135,17 +143,50 @@ def generate_slide_xml(
 
 
 def _slides_json(raw: str) -> str:
+    slides, _ = _extract_slide_xml_list(raw)
+    return json.dumps(slides or [raw], ensure_ascii=False)
+
+
+def _validated_slides_json(raw: str) -> tuple[str, str]:
+    slides, error = _extract_slide_xml_list(raw)
+    if error:
+        return "", error
+    if len(slides) > 10:
+        return "", "PPT 内容过多：slides +create 单次最多支持 10 页。"
+    for index, slide in enumerate(slides, start=1):
+        if not _slide_has_visible_text(slide):
+            return "", f"PPT 第 {index} 页缺少可见文本内容。"
+    return json.dumps(slides, ensure_ascii=False), ""
+
+
+def _extract_slide_xml_list(raw: str) -> tuple[list[str], str]:
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError:
         parsed = None
     if isinstance(parsed, list) and all(isinstance(item, str) for item in parsed):
-        return json.dumps(parsed, ensure_ascii=False)
+        slides = [item.strip() for item in parsed if item.strip()]
+        if not slides:
+            return [], "PPT 内容为空。"
+        invalid = [item for item in slides if not _is_slide_xml(item)]
+        if invalid:
+            return [], "PPT 内容必须是 <slide> XML 数组。"
+        return slides, ""
 
     fragments = re.findall(r"<slide\b.*?</slide>", raw, flags=re.DOTALL)
     if fragments:
-        return json.dumps(fragments, ensure_ascii=False)
-    return json.dumps([raw], ensure_ascii=False)
+        return [item.strip() for item in fragments], ""
+    return [], "PPT 内容没有有效 <slide> XML。"
+
+
+def _is_slide_xml(text: str) -> bool:
+    return bool(re.match(r"^\s*<slide\b[\s\S]*?</slide>\s*$", text))
+
+
+def _slide_has_visible_text(slide: str) -> bool:
+    text = re.sub(r"<[^>]+>", " ", slide)
+    text = re.sub(r"\s+", "", text)
+    return bool(text)
 
 
 def _parse_deck(raw: str) -> dict[str, Any]:
@@ -202,6 +243,8 @@ def _parse_deck(raw: str) -> dict[str, Any]:
                         "value": value,
                         "note": str(metric.get("note") or "").strip(),
                     })
+        if not bullets and not metrics and layout not in {"cover", "closing"}:
+            continue
         pages.append({
             "layout": layout,
             "title": title,
