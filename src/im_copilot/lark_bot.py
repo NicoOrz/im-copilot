@@ -92,6 +92,7 @@ class LarkBot:
         self._domain = domain.rstrip("/")
         self._debug = debug
         self.last_list_chat_messages_error: dict[str, Any] | None = None
+        self._bot_open_id = ""
 
         self._client = (
             lark.Client.builder()
@@ -133,6 +134,30 @@ class LarkBot:
             else:
                 result["data"] = data
         return result
+
+    def get_bot_open_id(self) -> str:
+        if self._bot_open_id:
+            return self._bot_open_id
+        try:
+            token = self._get_tenant_access_token()
+            resp = requests.get(
+                f"{self._domain}/open-apis/bot/v3/info",
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as exc:
+            logger.warning("get_bot_open_id failed: %s", exc)
+            return ""
+        if data.get("code") != 0:
+            logger.warning("get_bot_open_id failed: code=%s msg=%s", data.get("code"), data.get("msg"))
+            return ""
+        bot = data.get("bot") or data.get("data", {}).get("bot") or {}
+        open_id = str(bot.get("open_id") or "").strip()
+        if open_id:
+            self._bot_open_id = open_id
+        return self._bot_open_id
 
     # --------------------------------------------------------------------- #
     # Messaging

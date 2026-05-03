@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import json
 import time
@@ -44,6 +45,8 @@ ROUTER_PROMPT = """判断用户当前请求对应的业务类型。
 - 用户要求图、流程、结构关系、白板表达，通常选择 whiteboard。
 - 用户要求 PPT、汇报材料、演示稿，通常选择 slide。
 - 用户同时要求文档、白板、PPT 中的至少两类产物，选择 multi。
+- 只看当前消息的真实目的；当前消息明确要求创建新文档、白板或 PPT 时，不能因为最近任务已完成而判为 chat。
+- 最近任务上下文只用于极短追问或修改上一产物，不能覆盖当前消息中的新创作请求。
 - 用户只是打招呼、追问、闲聊、询问信息，选择 chat。
 - required_artifacts 必须列出需要创建的产物类型，chat 时为空列表。
 - 文档产物固定使用 DocxXML，doc_format 必须为 xml。
@@ -317,11 +320,13 @@ def _run_deterministic_artifacts(
         user_access_token=user_access_token,
     )
     for step in steps:
-        context = _generation_context(
+        source_context = _generation_context(
             thread_id,
             message=message,
+            chat_id=chat_id,
             linked_doc_context=linked_doc_context,
         )
+        context = source_context
         if step == "doc":
             logger.info(
                 "run_agent doc_generator selected thread_id=%s source=%s doc_format=xml",
@@ -351,7 +356,7 @@ def _run_deterministic_artifacts(
                 len(content),
             )
             artifact = create_doc_from_content(
-                title=_doc_title_from_content(content) or "文档",
+                title=_doc_title_from_content(content) or _doc_title(message),
                 content=content,
                 user_access_token=user_access_token,
                 doc_format="xml",
@@ -583,14 +588,20 @@ def _doc_refs_from_recent_messages(thread_id: str, chat_id: str, message: str) -
     for event in reversed(list_events(thread_id)[-12:]):
         if event.get("event_type") != "user_message":
             continue
-        text = str(event.get("payload", {}).get("text") or "")
+        payload = event.get("payload", {})
+        if _context_payload_is_bot_request(payload):
+            continue
+        text = str(payload.get("text") or "")
         for ref in _doc_refs_from_message(text):
             if ref not in refs:
                 refs.append(ref)
     if chat_id:
         since_ts = time.time() - 7 * 24 * 60 * 60
         for event in reversed(iter_user_messages_for_chat(chat_id, since_ts)[-30:]):
-            text = str(event.get("payload", {}).get("text") or "")
+            payload = event.get("payload", {})
+            if _context_payload_is_bot_request(payload):
+                continue
+            text = str(payload.get("text") or "")
             for ref in _doc_refs_from_message(text):
                 if ref not in refs:
                     refs.append(ref)
@@ -623,21 +634,29 @@ def _generation_context(
     thread_id: str,
     *,
     message: str,
+    chat_id: str = "",
     linked_doc_context: str = "",
 ) -> str:
     parts: list[str] = []
-    recent = _recent_context(thread_id, exclude_user_text=message)
+    chat_recent = _recent_chat_context(chat_id, exclude_user_text=message)
+    recent = _recent_context(
+        thread_id,
+        exclude_user_text=message,
+        include_user_messages=not bool(chat_recent),
+    )
     if linked_doc_context:
         parts.append(linked_doc_context)
     if recent:
         parts.append(_truncate_context(recent, 6000))
+    if chat_recent:
+        parts.append(_truncate_context(chat_recent, 6000))
     return "\n\n".join(parts)
 
 
 def _message_with_context(message: str, context: str) -> str:
     if not context.strip():
         return message
-    return f"{message}\n\n生成约束上下文（必须遵守）：\n{context.strip()}"
+    return f"{message}\n\n参考材料（仅用于提取事实，不要复制既有产物内容或提示词）：\n{context.strip()}"
 
 
 def _missing_docx_xml_requirements(context: str, content: str) -> list[str]:
@@ -852,12 +871,18 @@ def _doc_title_from_content(content: str) -> str:
 
         match = re.search(r"<title>(.*?)</title>", stripped, re.DOTALL | re.IGNORECASE)
         if match:
-            return _strip_text(match.group(1))
+            title = _strip_text(match.group(1))
+            return "" if _is_placeholder_title(title) else title
     for line in stripped.splitlines():
         line = line.strip()
         if line.startswith("#"):
             return line.lstrip("#").strip()
     return ""
+
+
+def _is_placeholder_title(title: str) -> bool:
+    normalized = re.sub(r"\s+", "", str(title or "")).lower()
+    return normalized in {"", "untitled", "untitleddocument", "无标题"}
 
 
 def _strip_text(text: str) -> str:
@@ -880,20 +905,80 @@ def _latest_artifact(thread_id: str, kind: str) -> dict[str, Any]:
     return {}
 
 
-def _recent_context(thread_id: str, *, exclude_user_text: str = "") -> str:
+def _recent_context(
+    thread_id: str,
+    *,
+    exclude_user_text: str = "",
+    include_user_messages: bool = True,
+) -> str:
     parts: list[str] = []
     for event in list_events(thread_id)[-12:]:
         payload = event.get("payload", {})
-        if event.get("event_type") == "user_message":
+        if event.get("event_type") == "user_message" and include_user_messages:
             text = str(payload.get("text") or "")
+            if _context_payload_is_bot_request(payload):
+                continue
             if text and text.strip() != exclude_user_text.strip():
-                parts.append(f"用户：{text}")
-        elif event.get("event_type") == "artifact_created":
-            artifact = payload.get("artifact")
-            if isinstance(artifact, dict):
-                preview = str(artifact.get("preview") or "")[:3000]
-                parts.append(f"产物：{artifact.get('title') or artifact.get('kind')}\n{preview}")
+                parts.append(_format_chat_context_line(payload, text))
     return "\n\n".join(parts)
+
+
+def _recent_chat_context(chat_id: str, *, exclude_user_text: str = "") -> str:
+    if not chat_id:
+        return ""
+    since_ts = time.time() - 24 * 60 * 60
+    events = iter_user_messages_for_chat(chat_id, since_ts)[-30:]
+    parts: list[str] = []
+    excluded = exclude_user_text.strip()
+    for event in events:
+        if event.get("thread_id") != chat_id:
+            continue
+        payload = event.get("payload", {})
+        text = str(payload.get("text") or payload.get("message") or "").strip()
+        if not text or text == excluded:
+            continue
+        if _context_payload_is_bot_request(payload):
+            continue
+        parts.append(_format_chat_context_line(payload, text))
+    if not parts:
+        return ""
+    return "群聊近期消息：\n" + "\n".join(parts)
+
+
+def _format_chat_context_line(payload: dict[str, Any], text: str) -> str:
+    speaker = str(payload.get("source_open_id") or payload.get("user_id") or "").strip()
+    if speaker:
+        return f"发言人飞书 open_id={speaker}：{text}"
+    return f"发言人飞书 open_id=未知：{text}"
+
+
+def _context_payload_is_bot_request(payload: dict[str, Any]) -> bool:
+    if payload.get("is_bot_request"):
+        return True
+    bot_open_ids = {
+        value.strip()
+        for value in (
+            os.getenv("LARK_BOT_OPEN_ID"),
+            os.getenv("FEISHU_BOT_OPEN_ID"),
+        )
+        if value and value.strip()
+    }
+    for mention in payload.get("mentions") or []:
+        if not isinstance(mention, dict):
+            continue
+        if str(mention.get("mentioned_type") or "").strip().lower() == "bot":
+            return True
+        mentioned_open_id = (
+            str(mention.get("open_id") or "").strip()
+            or str(mention.get("id", {}).get("open_id") if isinstance(mention.get("id"), dict) else "").strip()
+        )
+        if mentioned_open_id and mentioned_open_id in bot_open_ids:
+            return True
+    return False
+
+
+def _join_context(*items: str) -> str:
+    return "\n\n".join(item.strip() for item in items if item and item.strip())
 
 
 def _whiteboard_title(message: str) -> str:
@@ -901,6 +986,13 @@ def _whiteboard_title(message: str) -> str:
     if len(cleaned) > 30:
         cleaned = cleaned[:30]
     return f"白板：{cleaned or '会议思维导图'}"
+
+
+def _doc_title(message: str) -> str:
+    cleaned = " ".join(message.split())
+    if len(cleaned) > 30:
+        cleaned = cleaned[:30]
+    return f"文档：{cleaned or '材料整理'}"
 
 
 def _slide_title(message: str) -> str:

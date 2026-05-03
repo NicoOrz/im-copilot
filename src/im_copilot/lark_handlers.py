@@ -43,9 +43,9 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
     P2CardActionTriggerResponse,
 )
 
-from im_copilot.deep_agent.events import record_event
+from im_copilot.deep_agent.events import iter_user_messages_for_chat, record_event
 from im_copilot.deep_agent.service import run_agent
-from im_copilot.llm import invoke_structured
+from im_copilot.llm import get_llm_for_node, invoke_structured
 from im_copilot.lark_bot import LarkBot
 from im_copilot.lark_card import (
     create_approval_card,
@@ -68,8 +68,13 @@ _PERSISTED_MESSAGE_TTL_SECONDS = 7 * 24 * 60 * 60
 _ACK_REACTION = "Get"
 _DONE_REACTION = "DONE"
 _ERROR_REACTION = "CrossMark"
+_FEISHU_ARTIFACT_URL_RE = re.compile(
+    r"https?://[^\s)\]>\"']*feishu\.cn/"
+    r"(?:docx|doc|slides|sheets?|base|wiki|mindnotes|file|minutes)/[^\s)\]>\"']+"
+)
 _processed_messages: dict[str, float] = {}
 _processed_messages_lock = threading.Lock()
+_runtime_bot_open_id = ""
 
 
 def _processed_messages_db_path() -> str:
@@ -259,6 +264,7 @@ def _mentions_bot(text: str, mentions: list[dict[str, Any]]) -> bool:
     bot_open_ids = {
         value.strip()
         for value in (
+            _runtime_bot_open_id,
             os.getenv("LARK_BOT_OPEN_ID"),
             os.getenv("FEISHU_BOT_OPEN_ID"),
         )
@@ -272,14 +278,12 @@ def _mentions_bot(text: str, mentions: list[dict[str, Any]]) -> bool:
             os.getenv("LARK_BOT_NAME"),
             os.getenv("FEISHU_BOT_NAME"),
             os.getenv("BOT_NAME"),
-            "im-copilot",
-            "Agent-Pilot",
         )
         if value and value.strip()
     }
-    if any(str(m.get("name") or "").strip().lstrip("@").lower() in bot_names for m in mentions):
+    if bot_names and any(str(m.get("name") or "").strip().lstrip("@").lower() in bot_names for m in mentions):
         return True
-    return bool(mentions and _AT_MENTION_RE.match(text.strip()))
+    return any(str(m.get("mentioned_type") or "").strip().lower() == "bot" for m in mentions)
 
 
 def _mention_dicts(message: Any) -> list[dict[str, Any]]:
@@ -291,6 +295,7 @@ def _mention_dicts(message: Any) -> list[dict[str, Any]]:
             "name": getattr(mention, "name", "") or "",
             "open_id": getattr(user_id, "open_id", "") if user_id else "",
             "user_id": getattr(user_id, "user_id", "") if user_id else "",
+            "mentioned_type": getattr(mention, "mentioned_type", "") or "",
         })
     return result
 
@@ -497,6 +502,30 @@ def _result_reply_text(result: Any) -> str:
     return str(getattr(result, "summary", "") or "处理完成").strip()
 
 
+def _unverified_artifact_link_lines(result: Any, source_text: str = "") -> list[str]:
+    summary = str(getattr(result, "summary", "") or "")
+    artifact_urls = {
+        _normalize_url(str(artifact.get("url") or ""))
+        for artifact in (getattr(result, "artifacts", {}) or {}).values()
+        if isinstance(artifact, dict) and str(artifact.get("url") or "").strip()
+    }
+    source_urls = {
+        _normalize_url(match.group(0))
+        for match in _FEISHU_ARTIFACT_URL_RE.finditer(source_text or "")
+    }
+    lines: list[str] = []
+    for match in _FEISHU_ARTIFACT_URL_RE.finditer(summary):
+        url = _normalize_url(match.group(0))
+        if url in artifact_urls or url in source_urls:
+            continue
+        lines.append(f"- {url}")
+    return lines
+
+
+def _normalize_url(url: str) -> str:
+    return url.strip().rstrip("。；;，,.)）]")
+
+
 def _artifact_link_lines(artifacts: dict[str, Any]) -> list[str]:
     lines: list[str] = []
     for key in ("doc", "whiteboard", "slide"):
@@ -576,12 +605,29 @@ def _send_meeting_confirmation_cards(lark_bot: LarkBot, items: list[Any], recipi
         return
     start = str(metadata.get("start") or getattr(item, "due_at", "") or "")
     end = str(metadata.get("end") or "")
+    source_summary = _meeting_card_source_summary(
+        title=str(item.title or "会议"),
+        start=start,
+        end=end,
+        source_text=str(item.source_text or ""),
+    )
+    if not source_summary:
+        record_event(
+            str(item.chat_id),
+            "feishu",
+            "error",
+            {
+                "error": "meeting card source summary failed",
+                "board_item_id": int(item.id),
+            },
+        )
+        return
     card = create_meeting_confirmation_card(
         board_item_id=int(item.id),
         title=str(item.title or "会议"),
         start=start,
         end=end,
-        source_text=str(item.source_text or ""),
+        source_text=source_summary,
         attendee_ids=recipients,
     )
     for open_id in recipients:
@@ -598,6 +644,33 @@ def _send_meeting_confirmation_cards(lark_bot: LarkBot, items: list[Any], recipi
                     "response": resp,
                 },
             )
+
+
+def _meeting_card_source_summary(
+    *,
+    title: str,
+    start: str,
+    end: str,
+    source_text: str,
+) -> str:
+    prompt = (
+        "请为飞书会议确认卡片生成“依据”字段。\n"
+        "要求：中文，1 句话，40 字以内；只说明为什么这是一个会议候选；"
+        "保留关键时间、地点或对象；不要输出完整原文；不要添加原文没有的信息；不要 Markdown。\n\n"
+        f"会议事项：{title}\n"
+        f"时间：{start} ~ {end}\n"
+        f"群聊原文：{source_text}"
+    )
+    try:
+        content = get_llm_for_node("meeting_card_summary", timeout=20, max_retries=1).invoke(prompt).content
+    except Exception as exc:
+        logger.warning("meeting card source summary LLM failed: %s", exc)
+        return ""
+    text = str(content or "").strip()
+    text = re.sub(r"\s+", " ", text).strip("` \n")
+    if not text:
+        return ""
+    return text[:60]
 
 
 def _json_dict(text: str) -> dict[str, Any]:
@@ -694,6 +767,7 @@ def _process_message(
                 message_id=message_id,
                 source_open_id=open_id,
                 mentions=mentions,
+                is_bot_request=False,
             )
             board_result = extract_and_store_group_board_items(
                 text,
@@ -760,6 +834,21 @@ def _process_message(
 
     thread_id = _make_thread_id(chat_id)
     source = "feishu"
+    if is_group and is_mentioned and not is_bot_message:
+        record_event(
+            chat_id,
+            "feishu",
+            "user_message",
+            {
+                "text": text,
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "source_open_id": open_id,
+                "user_id": open_id,
+                "mentions": mentions,
+                "is_bot_request": True,
+            },
+        )
     logger.info(
         "lark_message agent_start chat_id=%s message_id=%s thread_id=%s open_id=%s text_len=%s",
         chat_id,
@@ -797,6 +886,7 @@ def _process_message(
     )
 
     try:
+        _sync_recent_chat_context(lark_bot, chat_id, current_message_id=message_id)
         result = run_agent(
             text,
             thread_id=thread_id,
@@ -828,6 +918,14 @@ def _process_message(
                 "处理失败：产物已生成记录不完整，缺少可访问链接。\n" + "\n".join(missing_artifact_links),
             )
             return
+        unverified_artifact_links = _unverified_artifact_link_lines(result, text)
+        if unverified_artifact_links:
+            _fail_message(lark_bot, message_id)
+            lark_bot.reply_text(
+                message_id,
+                "处理失败：回复中包含未验证的飞书产物链接。\n" + "\n".join(unverified_artifact_links),
+            )
+            return
         logger.info(
             "lark_message reply_result chat_id=%s message_id=%s thread_id=%s artifact_keys=%s summary_preview=%r",
             chat_id,
@@ -850,6 +948,76 @@ def _process_message(
         _fail_message(lark_bot, message_id)
         lark_bot.send_text(chat_id, f"处理出错：{exc}")
         session_manager.delete_session(thread_id)
+
+
+def _sync_recent_chat_context(
+    lark_bot: LarkBot,
+    chat_id: str,
+    *,
+    current_message_id: str = "",
+) -> int:
+    if not chat_id:
+        return 0
+    end_time = int(time.time())
+    start_time = end_time - _chat_context_lookback_seconds()
+    try:
+        messages = lark_bot.list_chat_messages(
+            chat_id,
+            start_time=start_time,
+            end_time=end_time,
+        )
+    except Exception:
+        logger.exception("chat_context sync failed: chat_id=%s", chat_id)
+        return 0
+    if not messages:
+        error = getattr(lark_bot, "last_list_chat_messages_error", None)
+        if error:
+            logger.warning("chat_context sync empty: chat_id=%s error=%s", chat_id, error)
+        return 0
+
+    existing_ids = {
+        str(event.get("payload", {}).get("message_id") or "")
+        for event in iter_user_messages_for_chat(chat_id, time.time() - 24 * 60 * 60)
+    }
+    synced = 0
+    for item in messages[-50:]:
+        message_id = str(item.get("message_id") or "")
+        if not message_id or message_id in existing_ids:
+            continue
+        if bool(item.get("deleted")):
+            continue
+        if str(item.get("sender_type") or "") != "user":
+            continue
+        if str(item.get("msg_type") or "") not in {"text", "post"}:
+            continue
+        mentions = list(item.get("mentions") or [])
+        text = _replace_mentions(_extract_text_content(str(item.get("content") or "")), mentions).strip()
+        if not text:
+            continue
+        record_event(
+            chat_id,
+            "feishu_history",
+            "user_message",
+            {
+                "text": text,
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "source_open_id": str(item.get("sender_id") or ""),
+                "user_id": str(item.get("sender_id") or ""),
+                "speaker_open_id": str(item.get("sender_id") or ""),
+                "mentions": mentions,
+                "is_bot_request": message_id == current_message_id or _mentions_bot(text, mentions),
+            },
+        )
+        existing_ids.add(message_id)
+        synced += 1
+    logger.info("chat_context synced: chat_id=%s count=%s", chat_id, synced)
+    return synced
+
+
+def _chat_context_lookback_seconds() -> int:
+    raw = os.getenv("LARK_CHAT_CONTEXT_LOOKBACK_SECONDS", "3600")
+    return int(raw) if raw.isdigit() else 3600
 
 
 def on_message_receive(data: P2ImMessageReceiveV1, lark_bot: LarkBot) -> None:
@@ -1118,7 +1286,10 @@ def build_event_handler(lark_bot: LarkBot) -> lark.EventDispatcherHandler:
     registered.
     """
     logger.debug("Building Lark event handler")
-    global _reminder_started
+    global _reminder_started, _runtime_bot_open_id
+    if not _runtime_bot_open_id:
+        _runtime_bot_open_id = lark_bot.get_bot_open_id()
+        logger.info("lark_bot identity loaded has_open_id=%s", bool(_runtime_bot_open_id))
     with _reminder_lock:
         if not _reminder_started:
             from im_copilot.memory.reminder_worker import start_reminder_loop
