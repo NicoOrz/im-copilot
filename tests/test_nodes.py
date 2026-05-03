@@ -9,6 +9,9 @@ from im_copilot.graph.nodes.slide_node import slide_node
 from im_copilot.graph.nodes.side_agent_node import side_agent_node
 from im_copilot.graph.nodes.verify_node import verify_node
 from im_copilot.graph.nodes.whiteboard_node import whiteboard_node
+from im_copilot.lark_handlers import _unverified_artifact_link_lines
+from im_copilot.lark_handlers import _meeting_card_source_summary
+from im_copilot.memory.todo_extractor import extract_todos_from_message
 from im_copilot.skills.config import get_skill_config
 from im_copilot.skills.registry import get_skill, planner_capability_text
 
@@ -151,6 +154,59 @@ class SkillRegistryTests(unittest.TestCase):
 
     def test_skill_config_uses_defaults(self):
         self.assertIn("system_prompt", get_skill_config("lark_doc"))
+
+
+class LarkReplyGuardTests(unittest.TestCase):
+    def test_flags_feishu_artifact_link_without_result_artifact(self):
+        result = MagicMock(
+            artifacts={},
+            summary="已生成：[打开文档](https://jcneyh7qlo8i.feishu.cn/docx/UfCIdmhmeoGpIBxSuXMcnMLunIb)",
+        )
+
+        lines = _unverified_artifact_link_lines(result)
+
+        self.assertEqual(lines, ["- https://jcneyh7qlo8i.feishu.cn/docx/UfCIdmhmeoGpIBxSuXMcnMLunIb"])
+
+    def test_allows_source_feishu_links_without_result_artifact(self):
+        url = "https://jcneyh7qlo8i.feishu.cn/docx/UfCIdmhmeoGpIBxSuXMcnMLunIb"
+        result = MagicMock(artifacts={}, summary=f"这个链接是 {url}")
+
+        lines = _unverified_artifact_link_lines(result, source_text=f"帮我看这个 {url}")
+
+        self.assertEqual(lines, [])
+
+
+class TodoExtractorTests(unittest.TestCase):
+    @patch("im_copilot.memory.todo_extractor.invoke_structured")
+    def test_bot_artifact_request_does_not_create_personal_todo(self, mock_invoke):
+        mock_invoke.return_value = MagicMock(is_todo=False, scope="none", confidence=0.0)
+        extract_todos_from_message(
+            "帮我们汇总讨论，生成一份技术方案文档，并在下周一前生成汇报 PPT",
+            source_open_id="ou_sender",
+            is_bot_request=True,
+        )
+
+        prompt = mock_invoke.call_args.args[2]
+
+        self.assertIn("is_bot_request：True", prompt)
+        self.assertIn("这类请求由 Agent 执行，不创建个人待办", prompt)
+
+
+class MeetingCardTests(unittest.TestCase):
+    @patch("im_copilot.lark_handlers.get_llm_for_node")
+    def test_meeting_card_source_summary_uses_llm(self, mock_get_llm):
+        mock_llm = MagicMock()
+        mock_llm.invoke.return_value = MagicMock(content="群聊明确提出今晚 19:00 在会议室对齐。")
+        mock_get_llm.return_value = mock_llm
+
+        result = _meeting_card_source_summary(
+            title="团队对齐会",
+            start="2026-05-03T19:00+08:00",
+            end="2026-05-03T19:30+08:00",
+            source_text="今晚 7 点在会议室拉会对齐",
+        )
+
+        self.assertEqual(result, "群聊明确提出今晚 19:00 在会议室对齐。")
 
 
 class MockNodeTests(unittest.TestCase):
