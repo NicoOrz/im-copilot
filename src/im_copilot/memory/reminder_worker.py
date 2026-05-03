@@ -7,6 +7,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from im_copilot.deep_agent.events import record_event
+from im_copilot.llm import get_llm_for_node
 from im_copilot.memory.todo_store import TodoRecord, todo_store
 
 logger = logging.getLogger(__name__)
@@ -44,7 +45,24 @@ def start_reminder_loop(lark_bot, interval_seconds: int = 60) -> threading.Threa
 
 
 def _send_one(lark_bot, todo: TodoRecord) -> bool:
-    text = f"任务提醒：{todo.title}\n截止：{todo.due_at}\n来源：{todo.source_text}"
+    try:
+        text = _generate_reminder_text(todo)
+    except Exception as exc:
+        record_event(
+            todo.chat_id,
+            "feishu",
+            "error",
+            {"error": "todo reminder LLM failed", "todo_id": todo.id, "detail": str(exc)},
+        )
+        return False
+    if not text:
+        record_event(
+            todo.chat_id,
+            "feishu",
+            "error",
+            {"error": "todo reminder LLM returned empty text", "todo_id": todo.id},
+        )
+        return False
     resp = lark_bot.send_text_to_open_id(todo.assignee_open_id, text)
     if resp.get("code") == 0:
         return True
@@ -55,3 +73,19 @@ def _send_one(lark_bot, todo: TodoRecord) -> bool:
         {"error": "todo reminder send failed", "todo_id": todo.id, "response": resp},
     )
     return False
+
+
+def _generate_reminder_text(todo: TodoRecord) -> str:
+    prompt = (
+        "请生成一条飞书单聊任务提醒。\n"
+        "要求：中文、简短、自然；不暴露内部字段名；不编造来源文本之外的信息；"
+        "保留原任务含义和时间；只输出提醒正文。\n\n"
+        f"title: {todo.title}\n"
+        f"action: {todo.action}\n"
+        f"due_at: {todo.due_at}\n"
+        f"source_text: {todo.source_text}\n"
+        f"chat_id: {todo.chat_id}\n"
+        f"assignee_open_id: {todo.assignee_open_id}"
+    )
+    content = get_llm_for_node("todo_reminder", timeout=20, max_retries=1).invoke(prompt).content
+    return str(content or "").strip()

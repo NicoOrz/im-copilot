@@ -82,6 +82,18 @@ class TodoStore:
     ) -> TodoRecord | None:
         now = time.time()
         with _conn() as conn:
+            existing = conn.execute(
+                """SELECT * FROM todos
+                   WHERE assignee_open_id = ?
+                     AND title = ?
+                     AND due_at = ?
+                     AND status IN ('pending', 'reminded')
+                   ORDER BY id ASC
+                   LIMIT 1""",
+                (assignee_open_id, title, due_at),
+            ).fetchone()
+            if existing:
+                return None
             cursor = conn.execute(
                 """INSERT OR IGNORE INTO todos
                    (chat_id, message_id, source_open_id, assignee_open_id, title, action,
@@ -133,16 +145,16 @@ class TodoStore:
                 f"SELECT * FROM todos {where} ORDER BY remind_at ASC, id ASC",
                 params,
             ).fetchall()
-        return [_row_to_todo(row) for row in rows]
+        return _dedupe_todos([_row_to_todo(row) for row in rows])
 
     def mark_done(self, todo_id: int, assignee_open_id: str = "") -> bool:
-        return self._set_status(todo_id, "done", assignee_open_id)
+        return self._set_status(todo_id, "done", assignee_open_id, include_duplicates=True)
 
     def delete(self, todo_id: int, assignee_open_id: str = "") -> bool:
-        return self._set_status(todo_id, "deleted", assignee_open_id)
+        return self._set_status(todo_id, "deleted", assignee_open_id, include_duplicates=True)
 
     def mark_reminded(self, todo_id: int) -> bool:
-        return self._set_status(todo_id, "reminded")
+        return self._set_status(todo_id, "reminded", include_duplicates=True)
 
     def due_for_reminder(self, now: datetime) -> list[TodoRecord]:
         with _conn() as conn:
@@ -151,7 +163,7 @@ class TodoStore:
                 "ORDER BY remind_at ASC, id ASC",
                 (now.isoformat(timespec="minutes"),),
             ).fetchall()
-        return [_row_to_todo(row) for row in rows]
+        return _dedupe_todos([_row_to_todo(row) for row in rows])
 
     def created_between(self, chat_id: str, start_ts: float, end_ts: float) -> list[TodoRecord]:
         with _conn() as conn:
@@ -162,7 +174,14 @@ class TodoStore:
             ).fetchall()
         return [_row_to_todo(row) for row in rows]
 
-    def _set_status(self, todo_id: int, status: str, assignee_open_id: str = "") -> bool:
+    def _set_status(
+        self,
+        todo_id: int,
+        status: str,
+        assignee_open_id: str = "",
+        *,
+        include_duplicates: bool = False,
+    ) -> bool:
         now = time.time()
         clauses = ["id = ?"]
         params: list[object] = [todo_id]
@@ -171,6 +190,28 @@ class TodoStore:
             params.append(assignee_open_id)
         params = [status, now, *params]
         with _conn() as conn:
+            target = conn.execute(
+                f"SELECT * FROM todos WHERE {' AND '.join(clauses)}",
+                params[2:],
+            ).fetchone()
+            if not target:
+                return False
+            if include_duplicates:
+                cursor = conn.execute(
+                    """UPDATE todos SET status = ?, updated_at = ?
+                       WHERE assignee_open_id = ?
+                         AND title = ?
+                         AND due_at = ?
+                         AND status IN ('pending', 'reminded')""",
+                    (
+                        status,
+                        now,
+                        target["assignee_open_id"],
+                        target["title"],
+                        target["due_at"],
+                    ),
+                )
+                return cursor.rowcount > 0
             cursor = conn.execute(
                 f"UPDATE todos SET status = ?, updated_at = ? WHERE {' AND '.join(clauses)}",
                 params,
@@ -194,6 +235,18 @@ def _row_to_todo(row: sqlite3.Row) -> TodoRecord:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
+
+
+def _dedupe_todos(todos: list[TodoRecord]) -> list[TodoRecord]:
+    seen: set[tuple[str, str, str]] = set()
+    result: list[TodoRecord] = []
+    for todo in todos:
+        key = (todo.assignee_open_id, todo.title, todo.due_at)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(todo)
+    return result
 
 
 todo_store = TodoStore()
