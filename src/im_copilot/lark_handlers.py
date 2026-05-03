@@ -256,9 +256,29 @@ def _get_interrupt_info(step: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _mentions_bot(text: str, mentions: list[dict[str, Any]]) -> bool:
-    bot_open_id = os.getenv("LARK_BOT_OPEN_ID") or os.getenv("FEISHU_BOT_OPEN_ID") or ""
-    if bot_open_id:
-        return any(m.get("open_id") == bot_open_id for m in mentions)
+    bot_open_ids = {
+        value.strip()
+        for value in (
+            os.getenv("LARK_BOT_OPEN_ID"),
+            os.getenv("FEISHU_BOT_OPEN_ID"),
+        )
+        if value and value.strip()
+    }
+    if bot_open_ids:
+        return any(str(m.get("open_id") or "").strip() in bot_open_ids for m in mentions)
+    bot_names = {
+        value.strip().lstrip("@").lower()
+        for value in (
+            os.getenv("LARK_BOT_NAME"),
+            os.getenv("FEISHU_BOT_NAME"),
+            os.getenv("BOT_NAME"),
+            "im-copilot",
+            "Agent-Pilot",
+        )
+        if value and value.strip()
+    }
+    if any(str(m.get("name") or "").strip().lstrip("@").lower() in bot_names for m in mentions):
+        return True
     return bool(mentions and _AT_MENTION_RE.match(text.strip()))
 
 
@@ -466,8 +486,43 @@ def _react_message(lark_bot: LarkBot, message_id: str, emoji_type: str) -> None:
 
 
 def _reply_result(lark_bot: LarkBot, message_id: str, result: Any) -> None:
-    text = result.summary or "处理完成"
+    text = _result_reply_text(result)
     lark_bot.reply_text(message_id, text)
+
+
+def _result_reply_text(result: Any) -> str:
+    artifact_lines = _artifact_link_lines(getattr(result, "artifacts", {}) or {})
+    if artifact_lines:
+        return "好的，已生成，以下是产物链接：\n" + "\n".join(artifact_lines)
+    return str(getattr(result, "summary", "") or "处理完成").strip()
+
+
+def _artifact_link_lines(artifacts: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+    for key in ("doc", "whiteboard", "slide"):
+        artifact = artifacts.get(key)
+        if not isinstance(artifact, dict):
+            continue
+        url = str(artifact.get("url") or "").strip()
+        if not url:
+            continue
+        title = str(artifact.get("title") or artifact.get("kind") or key).strip()
+        lines.append(f"- {title}：{url}")
+    return lines
+
+
+def _missing_artifact_link_lines(artifacts: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+    for key in ("doc", "whiteboard", "slide"):
+        artifact = artifacts.get(key)
+        if not isinstance(artifact, dict):
+            continue
+        if str(artifact.get("url") or "").strip():
+            continue
+        title = str(artifact.get("title") or artifact.get("kind") or key).strip()
+        status = str(artifact.get("status") or "unknown").strip()
+        lines.append(f"- {title}：{status}")
+    return lines
 
 
 def _send_private_group_command_response(
@@ -764,6 +819,14 @@ def _process_message(
         if result.status == "error":
             _fail_message(lark_bot, message_id)
             lark_bot.reply_text(message_id, f"处理出错：{result.error}")
+            return
+        missing_artifact_links = _missing_artifact_link_lines(result.artifacts)
+        if missing_artifact_links:
+            _fail_message(lark_bot, message_id)
+            lark_bot.reply_text(
+                message_id,
+                "处理失败：产物已生成记录不完整，缺少可访问链接。\n" + "\n".join(missing_artifact_links),
+            )
             return
         logger.info(
             "lark_message reply_result chat_id=%s message_id=%s thread_id=%s artifact_keys=%s summary_preview=%r",

@@ -716,7 +716,7 @@ def _route_message(message: str, thread_id: str) -> RouteDecision:
         f"近几轮历史：\n{history_text or '（无）'}"
     )
     try:
-        raw = llm.invoke(fallback_prompt)
+        raw = get_llm_for_node("deep_agent_router").invoke(fallback_prompt)
         content = _content_to_text(getattr(raw, "content", raw))
         parsed = _parse_route_payload(content)
         if parsed:

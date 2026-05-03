@@ -31,25 +31,37 @@ def _load_node_config() -> dict:
 
 
 def get_llm(**kwargs) -> ChatOpenAI:
+    kwargs = dict(kwargs)
+    model = kwargs.pop("model", None) or os.getenv("VOLC_MODEL", "ep-20260422180225-zllc4")
+    base_url = kwargs.pop("base_url", None) or os.getenv("VOLC_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3")
+    api_key = kwargs.pop("api_key", None) or os.getenv("VOLC_API_KEY")
+    kwargs = _llm_kwargs(model, base_url, kwargs)
     return ChatOpenAI(
-        model=os.getenv("VOLC_MODEL", "ep-20260422180225-zllc4"),
-        api_key=os.getenv("VOLC_API_KEY"),
-        base_url=os.getenv("VOLC_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3"),
+        model=model,
+        api_key=api_key,
+        base_url=base_url,
         **kwargs,
     )
 
 
 def get_llm_for_node(node_name: str, **kwargs) -> ChatOpenAI:
+    kwargs = dict(kwargs)
     node_cfg = _load_node_config().get(node_name) or {}
+    model = kwargs.pop("model", None) or node_cfg.get("model") or os.getenv("VOLC_MODEL", "ep-20260422180225-zllc4")
+    base_url = kwargs.pop("base_url", None) or node_cfg.get("base_url") or os.getenv("VOLC_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3")
+    api_key = kwargs.pop("api_key", None) or node_cfg.get("api_key") or os.getenv("VOLC_API_KEY")
+    kwargs = _llm_kwargs(model, base_url, kwargs)
     return ChatOpenAI(
-        model=node_cfg.get("model") or os.getenv("VOLC_MODEL", "ep-20260422180225-zllc4"),
-        api_key=node_cfg.get("api_key") or os.getenv("VOLC_API_KEY"),
-        base_url=node_cfg.get("base_url") or os.getenv("VOLC_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3"),
+        model=model,
+        api_key=api_key,
+        base_url=base_url,
         **kwargs,
     )
 
 
 def invoke_structured(node_name: str, schema: type[T], prompt: str, **kwargs) -> T:
+    kwargs.setdefault("max_tokens", int(os.getenv("STRUCTURED_LLM_MAX_TOKENS", "4096")))
+    kwargs = _json_object_kwargs(kwargs)
     return invoke_structured_with_llm(get_llm_for_node(node_name, **kwargs), schema, prompt)
 
 
@@ -67,8 +79,6 @@ def invoke_structured_with_llm(llm: object, schema: type[T], prompt: str) -> T:
 
 def _model_fields_from_object(value: object, schema: type[BaseModel]) -> dict[str, object]:
     if isinstance(value, schema):
-        return value.model_dump()
-    if isinstance(value, BaseModel):
         return value.model_dump()
     data = getattr(value, "__dict__", None)
     if not isinstance(data, dict):
@@ -115,3 +125,25 @@ def _parse_json_content(text: str) -> object:
             continue
         return value
     raise ValueError("LLM did not return valid JSON")
+
+
+def _llm_kwargs(model: str, base_url: str, kwargs: dict) -> dict:
+    result = dict(kwargs)
+    if not _is_deepseek(model, base_url):
+        return result
+    extra_body = dict(result.get("extra_body") or {})
+    extra_body.setdefault("thinking", {"type": "disabled"})
+    result["extra_body"] = extra_body
+    return result
+
+
+def _json_object_kwargs(kwargs: dict) -> dict:
+    result = dict(kwargs)
+    model_kwargs = dict(result.get("model_kwargs") or {})
+    model_kwargs["response_format"] = {"type": "json_object"}
+    result["model_kwargs"] = model_kwargs
+    return result
+
+
+def _is_deepseek(model: str, base_url: str) -> bool:
+    return "deepseek" in str(model or "").lower() or "deepseek" in str(base_url or "").lower()
