@@ -345,12 +345,7 @@ def create_meeting_confirmation_card(
 ) -> dict:
     time_text = f"{start} ~ {end}" if start and end else "时间待确认"
     attendees_text = "、".join(_at_tag(item) for item in attendee_ids) if attendee_ids else "仅创建者"
-    content = (
-        f"**会议事项:** {title}\n\n"
-        f"**时间:** {time_text}\n\n"
-        f"**参与人:** {attendees_text}\n\n"
-        f"**来源:** {source_text}"
-    )
+    source_excerpt = source_text.strip() or "来自群聊会议候选"
 
     card = _base_card()
     card["header"] = {
@@ -365,7 +360,12 @@ def create_meeting_confirmation_card(
         {
             "tag": "markdown",
             "element_id": "meeting_confirm_md",
-            "content": content,
+            "content": (
+                f"**会议事项**\n{title}\n\n"
+                f"**时间**\n{time_text}\n\n"
+                f"**参与人**\n{attendees_text}\n\n"
+                f"**依据**\n{source_excerpt}"
+            ),
             "text_align": "left",
             "text_size": "normal_v2",
             "margin": "0px 0px 0px 0px",
