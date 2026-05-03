@@ -23,6 +23,7 @@ def sync_today(chat_id: str) -> int:
             source_open_id=str(payload.get("source_open_id") or payload.get("user_id") or ""),
             source=str(event.get("source") or "feishu"),
             mentions=mentions,
+            is_bot_request=bool(payload.get("is_bot_request")),
         )
         board = extract_and_store_group_board_items(
             str(payload.get("text") or ""),

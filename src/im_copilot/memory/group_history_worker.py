@@ -135,7 +135,7 @@ def _process_history_message(lark_bot: LarkBot, message: dict[str, Any]) -> bool
     if str(message.get("msg_type") or "") not in {"text", "post"}:
         return False
     mentions = list(message.get("mentions") or [])
-    if _mentions_bot(mentions):
+    if _mentions_bot(mentions, lark_bot.get_bot_open_id()):
         return False
 
     text = _extract_text_content(str(message.get("content") or ""))
@@ -170,6 +170,7 @@ def _process_history_message(lark_bot: LarkBot, message: dict[str, Any]) -> bool
         source_open_id=source_open_id,
         source="feishu_history",
         mentions=mentions,
+        is_bot_request=False,
     )
     board_result = extract_and_store_group_board_items(
         text,
@@ -187,8 +188,8 @@ def _process_history_message(lark_bot: LarkBot, message: dict[str, Any]) -> bool
     return True
 
 
-def _mentions_bot(mentions: list[Any]) -> bool:
-    bot_open_id = os.getenv("LARK_BOT_OPEN_ID") or os.getenv("FEISHU_BOT_OPEN_ID") or ""
+def _mentions_bot(mentions: list[Any], bot_open_id: str = "") -> bool:
+    bot_open_id = bot_open_id or os.getenv("LARK_BOT_OPEN_ID") or os.getenv("FEISHU_BOT_OPEN_ID") or ""
     if not bot_open_id:
         return False
     for mention in mentions:

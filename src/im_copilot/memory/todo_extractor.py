@@ -45,6 +45,7 @@ def extract_todos_from_message(
     *,
     source_open_id: str,
     mentions: list[dict] | None = None,
+    is_bot_request: bool = False,
     now: datetime | None = None,
 ) -> list[TodoDraft]:
     clean = _clean_text(text)
@@ -56,6 +57,7 @@ def extract_todos_from_message(
             clean,
             source_open_id=source_open_id,
             mentions=mentions or [],
+            is_bot_request=is_bot_request,
             now=current_time,
         )
     except Exception:
@@ -91,6 +93,7 @@ def extract_and_store_todos(
     source_open_id: str,
     source: str = "feishu",
     mentions: list[dict] | None = None,
+    is_bot_request: bool = False,
     now: datetime | None = None,
 ) -> list[TodoRecord]:
     records: list[TodoRecord] = []
@@ -98,6 +101,7 @@ def extract_and_store_todos(
         text,
         source_open_id=source_open_id,
         mentions=mentions,
+        is_bot_request=is_bot_request,
         now=now,
     )
     for draft in drafts:
@@ -169,6 +173,7 @@ def _extract_with_llm(
     *,
     source_open_id: str,
     mentions: list[dict],
+    is_bot_request: bool,
     now: datetime,
 ) -> TodoExtractionOutput:
     mention_lines = [
@@ -184,9 +189,12 @@ def _extract_with_llm(
         "输出字段含义：is_todo 表示是否创建待办；scope 为 personal/team/none；"
         "assignee_open_id 必须来自 source_open_id 或 mentions；due_at/remind_at 必须为 ISO 8601，无法确定则留空。\n"
         "个人自我提醒可以输出 personal；团队公开事项如果明确要求某人行动，可输出 team；闲聊和无行动事项输出 none。\n"
+        "如果 is_bot_request=true，表示用户是在要求机器人生成文档、PPT、画板、总结或执行工具；"
+        "这类请求由 Agent 执行，不创建个人待办，除非消息明确要求给某个真实成员创建独立待办。\n"
         "confidence 低于明确可执行程度时设为较低值；信息缺失需要确认时 needs_confirmation=true。\n\n"
         f"当前时间：{now.isoformat(timespec='minutes')}\n"
         f"source_open_id：{source_open_id}\n"
+        f"is_bot_request：{is_bot_request}\n"
         f"mentions：{mention_lines}\n"
         f"消息：{text}"
     )
