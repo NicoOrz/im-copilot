@@ -21,6 +21,7 @@ def build_subagents(
                 "如果调用方已经提供 lark-doc 上下文，直接遵循该上下文完成文档。"
                 "必须先生成完整内容，再调用 create_doc_artifact，不直接调用 lark-cli。"
                 "内容要忠实覆盖用户材料，不添加无依据事实。"
+                "文档标题必须来自用户主题或材料中的核心事项，禁止使用 Untitled、无标题或空标题。"
             ),
             "tools": [doc_tool],
             "skills": skills or [],
@@ -39,7 +40,7 @@ def build_subagents(
             "description": "Generate complete slide XML and create Feishu slide artifacts.",
             "system_prompt": (
                 "你负责生成完整 PPT 产物。必须生成 JSON 字符串数组形式的完整 slide XML，"
-                "再调用 create_slide_artifact。"
+                "每个元素都必须是完整 <slide> XML，且必须包含可见文本内容，再调用 create_slide_artifact。"
             ),
             "tools": [slide_tool],
         },

@@ -178,7 +178,8 @@ def generate_doc_content(message: str) -> str:
 任务：
 - 生成完整 DocxXML 内容
 - 忠实反映用户材料的关键信息，不添加无依据事实
-- DocxXML 必须包含唯一 <title>
+- DocxXML 必须包含唯一 <title>，标题必须来自用户主题或材料中的核心事项
+- 禁止使用 Untitled、无标题、默认标题或空标题
 - 必须输出合法 XML 标签结构，标签本身不要转义
 - 如果是 PRD 或产品需求文档，必须使用 PRD 模板，且输出 DocxXML，不得输出 Markdown
 - 如果是会议纪要，必须使用会议纪要模板，且输出 DocxXML，不得输出 Markdown
@@ -199,6 +200,7 @@ def _doc_generation_prompt() -> str:
 - 根据用户材料生成完整文档内容，不添加无依据事实。
 - 固定使用 DocxXML，即使用户提到 Markdown 也输出 DocxXML。
 - 当前代码会负责创建飞书文档；你只负责输出文档内容。
+- 文档必须有明确标题，禁止输出 Untitled、无标题、默认标题或空标题。
 - 如用户要求生成 PRD、产品需求文档、需求方案或需求说明，必须使用下方 PRD 模板。
 - 如用户要求生成会议纪要，必须使用下方会议纪要模板。
 - 如果用户要求从会议材料生成 PRD，使用 PRD 模板。
@@ -280,6 +282,7 @@ def _doc_system_prompt(*, markdown: bool = False) -> str:
 def _lark_doc_context(*, markdown: bool = False) -> str:
     context = (
         "输出要求：只输出合法 DocxXML；每篇只含一个 <title>；"
+        "标题必须来自用户主题或材料中的核心事项，禁止使用 Untitled、无标题、默认标题或空标题；"
         "不要输出 Markdown 标题、代码块或 Markdown 表格。"
     )
     logger.info("lark_doc_context loaded compact markdown=%s total_chars=%s", markdown, len(context))

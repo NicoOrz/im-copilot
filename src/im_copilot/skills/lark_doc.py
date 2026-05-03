@@ -5,6 +5,7 @@ import logging
 import re
 import xml.etree.ElementTree as ET
 from collections.abc import Mapping
+from html import escape
 from typing import Any
 
 from im_copilot.lark_cli import run_lark_cli
@@ -38,7 +39,8 @@ DOC_PROMPT = """{system_prompt}
 要求：
 - 直接输出完整内容
 - 忠实反映原始材料的关键信息，不添加原始材料中没有的内容
-- DocxXML 必须包含唯一 <title>
+- DocxXML 必须包含唯一 <title>；标题必须来自用户主题或材料中的核心事项
+- 禁止使用 Untitled、无标题、默认标题或空标题
 - 固定使用 DocxXML
 """
 
@@ -80,6 +82,8 @@ def create_doc_from_content(
     doc_format: str = "xml",
 ) -> SkillArtifact:
     doc_format = "xml"
+    preview = content
+    content = _normalize_doc_title(content, title)
     logger.info(
         "create_doc_from_content start title=%r doc_format=%s content_len=%s has_user_token=%s",
         title,
@@ -91,7 +95,7 @@ def create_doc_from_content(
         "kind": "doc",
         "title": title,
         "status": "draft",
-        "preview": content,
+        "preview": preview,
         "token": "",
         "url": "",
     }
@@ -142,6 +146,36 @@ def create_doc_from_content(
         result.get("url"),
     )
     return result
+
+
+def _normalize_doc_title(content: str, title: str) -> str:
+    safe_title = _safe_doc_title(title, content)
+    title_re = re.compile(r"<title\b[^>]*>(.*?)</title>", re.DOTALL | re.IGNORECASE)
+    match = title_re.search(content or "")
+    escaped = escape(safe_title, quote=True)
+    if match:
+        current = _strip_tags(match.group(1)).strip()
+        if _is_placeholder_title(current):
+            return title_re.sub(f"<title>{escaped}</title>", content, count=1)
+        return content
+    return f"<title>{escaped}</title>\n{content or ''}".strip()
+
+
+def _safe_doc_title(title: str, content: str) -> str:
+    candidates = [
+        title,
+        _strip_tags(_first_match(r"<h[1-9]\b[^>]*>(.*?)</h[1-9]>", content or "")),
+    ]
+    for candidate in candidates:
+        value = str(candidate or "").strip()
+        if not _is_placeholder_title(value):
+            return value
+    return "文档"
+
+
+def _is_placeholder_title(title: str) -> bool:
+    normalized = re.sub(r"\s+", "", str(title or "")).lower()
+    return normalized in {"", "untitled", "untitleddocument", "无标题"}
 
 
 def fetch_doc_content(
