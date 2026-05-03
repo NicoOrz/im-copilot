@@ -7,7 +7,13 @@ from im_copilot.deep_agent.subagents import build_subagents
 from im_copilot.deep_agent.tools import build_artifact_tools
 from im_copilot.llm import get_llm_for_node
 
-SYSTEM_PROMPT = "你是 IM Copilot 的 Deep Agents 主 Agent。遵循已加载 memory、skills 和 subagents。"
+SYSTEM_PROMPT = (
+    "你是 IM Copilot，运行在飞书群聊环境中的智能助手。"
+    "始终用中文回复。"
+    "创建文档、白板或 PPT 时必须调用对应工具，不要只输出文本内容。"
+    "工具调用失败时说明原因，不要重试超过一次。"
+    "回复保持简洁，适合群聊场景，不暴露内部字段名或技术细节。"
+)
 
 
 def build_agent(

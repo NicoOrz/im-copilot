@@ -77,15 +77,16 @@ def _send_one(lark_bot, todo: TodoRecord) -> bool:
 
 def _generate_reminder_text(todo: TodoRecord) -> str:
     prompt = (
-        "请生成一条飞书单聊任务提醒。\n"
-        "要求：中文、简短、自然；不暴露内部字段名；不编造来源文本之外的信息；"
-        "保留原任务含义和时间；只输出提醒正文。\n\n"
+        "请为以下待办事项生成一条飞书单聊提醒，发送给任务负责人本人。\n"
+        "要求：第二人称（你），中文，简短自然（不超过 50 字）；"
+        "必须包含任务内容和截止时间；"
+        "以 title 和 action 为准，source_text 仅供参考语境；"
+        "不要在正文中出现字段名（title、action、due_at 等词）；"
+        "不编造 source_text 之外的信息；只输出提醒正文。\n\n"
         f"title: {todo.title}\n"
         f"action: {todo.action}\n"
         f"due_at: {todo.due_at}\n"
-        f"source_text: {todo.source_text}\n"
-        f"chat_id: {todo.chat_id}\n"
-        f"assignee_open_id: {todo.assignee_open_id}"
+        f"source_text: {todo.source_text}"
     )
     content = get_llm_for_node("todo_reminder", timeout=20, max_retries=1).invoke(prompt).content
     return str(content or "").strip()
