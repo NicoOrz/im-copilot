@@ -93,3 +93,29 @@ def test_needs_confirmation_stored_as_awaiting(tmp_path, monkeypatch):
     awaiting = [r for r in records if r.status == "awaiting_confirmation"]
     assert len(awaiting) == 1
     assert awaiting[0].assignee_open_id == "ou_abc"
+
+from im_copilot.lark_card import create_todo_confirm_card
+
+def test_create_todo_confirm_card_structure():
+    card = create_todo_confirm_card(
+        todo_id=42,
+        title="给数据口径",
+        action="提交数据口径文档",
+        due_at="2026-05-08T18:00",
+        source_text="赵磊周五18:00前给数据口径",
+        source_open_id="ou_sender",
+    )
+    assert card["schema"] == "2.0"
+    body_elements = card["body"]["elements"]
+    md_elements = [e for e in body_elements if e.get("tag") == "markdown"]
+    assert len(md_elements) >= 1
+    md_text = md_elements[0]["content"]
+    assert "给数据口径" in md_text
+    assert "2026-05-08T18:00" in md_text
+    btn_elements = [e for e in body_elements if e.get("tag") == "button"]
+    assert len(btn_elements) == 2
+    actions = [b["behaviors"][0]["value"]["action"] for b in btn_elements]
+    assert "confirm_todo" in actions
+    assert "reject_todo" in actions
+    for btn in btn_elements:
+        assert btn["behaviors"][0]["value"]["todo_id"] == 42

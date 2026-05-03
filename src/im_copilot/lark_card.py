@@ -414,3 +414,73 @@ def create_meeting_confirmation_card(
 
 def _at_tag(open_id: str) -> str:
     return f"<at id={open_id}></at>"
+
+
+def create_todo_confirm_card(
+    todo_id: int,
+    title: str,
+    action: str,
+    due_at: str,
+    source_text: str,
+    source_open_id: str,
+    assignee_name: str = "",
+) -> dict:
+    """Return an interactive todo confirmation card.
+
+    Args:
+        todo_id: The unique identifier for the todo.
+        title: The todo title.
+        action: The action to be taken.
+        due_at: The deadline in ISO format (e.g., "2026-05-08T18:00").
+        source_text: The original source message text.
+        source_open_id: The open_id of the user who created the todo.
+        assignee_name: Optional name of the person assigned to the todo.
+
+    Returns:
+        A Feishu CardKit V2 dict with markdown content and confirm/reject buttons.
+    """
+    assignee_line = f"**负责人：** {assignee_name}\n" if assignee_name else ""
+    content = (
+        f"**事项：** {title}\n"
+        f"**动作：** {action}\n"
+        f"**截止时间：** {due_at}\n"
+        f"{assignee_line}"
+        f"**来源消息：** {source_text}"
+    )
+    card = _base_card()
+    card["header"] = {
+        "title": {"tag": "plain_text", "content": "待办确认"},
+        "template": "yellow",
+        "padding": "12px 12px 12px 12px",
+    }
+    card["body"]["elements"] = [
+        {
+            "tag": "markdown",
+            "element_id": "todo_confirm_md",
+            "content": content,
+            "text_align": "left",
+            "text_size": "normal_v2",
+            "margin": "0px 0px 0px 0px",
+        },
+        {
+            "tag": "button",
+            "element_id": "confirm_todo_btn",
+            "text": {"tag": "plain_text", "content": "确认"},
+            "type": "primary",
+            "behaviors": [
+                {"type": "callback", "value": {"action": "confirm_todo", "todo_id": todo_id}}
+            ],
+            "margin": "8px 0px 0px 0px",
+        },
+        {
+            "tag": "button",
+            "element_id": "reject_todo_btn",
+            "text": {"tag": "plain_text", "content": "忽略"},
+            "type": "default",
+            "behaviors": [
+                {"type": "callback", "value": {"action": "reject_todo", "todo_id": todo_id}}
+            ],
+            "margin": "4px 0px 0px 0px",
+        },
+    ]
+    return card
