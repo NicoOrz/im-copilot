@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
-TodoStatus = Literal["pending", "reminded", "done", "deleted"]
+TodoStatus = Literal["pending", "reminded", "done", "deleted", "awaiting_confirmation"]
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS todos (
@@ -79,6 +79,7 @@ class TodoStore:
         due_at: str,
         remind_at: str,
         source_text: str,
+        status: str = "pending",
     ) -> TodoRecord | None:
         now = time.time()
         with _conn() as conn:
@@ -87,7 +88,7 @@ class TodoStore:
                    WHERE assignee_open_id = ?
                      AND title = ?
                      AND due_at = ?
-                     AND status IN ('pending', 'reminded')
+                     AND status IN ('pending', 'reminded', 'awaiting_confirmation')
                    ORDER BY id ASC
                    LIMIT 1""",
                 (assignee_open_id, title, due_at),
@@ -98,7 +99,7 @@ class TodoStore:
                 """INSERT OR IGNORE INTO todos
                    (chat_id, message_id, source_open_id, assignee_open_id, title, action,
                     due_at, remind_at, status, source_text, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     chat_id,
                     message_id,
@@ -108,6 +109,7 @@ class TodoStore:
                     action,
                     due_at,
                     remind_at,
+                    status,
                     source_text,
                     now,
                     now,
@@ -222,6 +224,22 @@ class TodoStore:
                 params,
             )
             return cursor.rowcount > 0
+
+    def get_by_id(self, todo_id: int) -> TodoRecord | None:
+        with _conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM todos WHERE id = ?", (todo_id,)
+            ).fetchone()
+        return _row_to_todo(row) if row else None
+
+    def update_status(self, todo_id: int, status: str) -> bool:
+        now = time.time()
+        with _conn() as conn:
+            cursor = conn.execute(
+                "UPDATE todos SET status = ?, updated_at = ? WHERE id = ?",
+                (status, now, todo_id),
+            )
+        return cursor.rowcount > 0
 
 
 def _row_to_todo(row: sqlite3.Row) -> TodoRecord:
