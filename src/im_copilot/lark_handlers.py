@@ -55,6 +55,7 @@ from im_copilot.lark_card import (
     create_progress_card,
     create_result_card,
     create_streaming_card,
+    create_todo_confirm_card,
 )
 from im_copilot.oauth_scopes import user_oauth_scope_string
 from im_copilot.session_manager import session_manager
@@ -757,6 +758,49 @@ def _process_audio_message(
     )
 
 
+def _send_todo_confirmation_cards(
+    lark_bot: LarkBot,
+    records: list,
+    *,
+    source_open_id: str = "",
+) -> None:
+    from im_copilot.memory.todo_store import TodoRecord
+    for record in records:
+        if not isinstance(record, TodoRecord):
+            continue
+        if record.status != "awaiting_confirmation":
+            continue
+        recipient = record.assignee_open_id or source_open_id
+        if not recipient:
+            logger.warning(
+                "todo_confirm: no recipient for todo_id=%s title=%r",
+                record.id,
+                record.title,
+            )
+            continue
+        card = create_todo_confirm_card(
+            todo_id=record.id,
+            title=record.title,
+            action=record.action,
+            due_at=record.due_at,
+            source_text=record.source_text,
+            source_open_id=source_open_id,
+        )
+        try:
+            lark_bot.send_card_to_open_id(recipient, card)
+            logger.info(
+                "todo_confirm card sent: todo_id=%s recipient=%s",
+                record.id,
+                recipient,
+            )
+        except Exception:
+            logger.exception(
+                "todo_confirm card send failed: todo_id=%s recipient=%s",
+                record.id,
+                recipient,
+            )
+
+
 def _process_message(
     text: str,
     chat_id: str,
@@ -813,7 +857,7 @@ def _process_message(
                     "mentions": mentions,
                 },
             )
-            extract_and_store_todos(
+            todo_records = extract_and_store_todos(
                 text,
                 chat_id=chat_id,
                 message_id=message_id,
@@ -821,6 +865,7 @@ def _process_message(
                 mentions=mentions,
                 is_bot_request=False,
             )
+            _send_todo_confirmation_cards(lark_bot, todo_records, source_open_id=open_id)
             board_result = extract_and_store_group_board_items(
                 text,
                 chat_id=chat_id,
