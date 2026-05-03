@@ -71,6 +71,7 @@ def extract_and_store_group_board_items(
     current_time = now or datetime.now(_TZ)
     context = _recent_context(chat_id, current_time)
     existing_items = _existing_open_items(chat_id)
+    known_users = _build_known_users(source_open_id, mentions, context)
 
     try:
         extracted = _extract_with_llm(
@@ -78,6 +79,7 @@ def extract_and_store_group_board_items(
             chat_id=chat_id,
             source_open_id=source_open_id,
             mentions=mentions,
+            known_users=known_users,
             now=current_time,
             context=context,
             existing_items=existing_items,
@@ -206,6 +208,7 @@ def _extract_with_llm(
     chat_id: str,
     source_open_id: str,
     mentions: list[dict],
+    known_users: dict[str, str],
     now: datetime,
     context: list[dict[str, Any]],
     existing_items: list[GroupBoardItem],
@@ -230,7 +233,9 @@ def _extract_with_llm(
         "如果当前消息或近期上下文提供了会议地点，不要留空或写未指定。\n"
         "如果当前消息是在补充会议地点、时间、主持人或参与人，优先合并到已有 meeting。\n"
         "时间请用 ISO 8601，无法确定则留空。会议 end_at 缺失可留空。\n"
-        "负责人和 recipients 的 open_id 只能来自 mentions 或 source_open_id；owner_name 使用 mentions 中的 name。\n"
+        "负责人和 recipients 的 open_id 只能来自 mentions、source_open_id 或 known_users；"
+        "如果消息中提到的人名在 known_users 中有对应 open_id，必须使用该 open_id；"
+        "owner_name 使用 mentions 或 known_users 中的 name。\n"
         "metadata 必须包含 public_scope，团队公开事项为 team，个人事项不要输出。\n"
         "如果当前消息是在补充或修正已有看板项，设置 merge_item_id 为 existing_items 中对应 id。\n"
         "如果近期上下文里多条消息描述同一个公开事项，把时间、地点、负责人等合并到同一个 item。\n"
@@ -240,6 +245,8 @@ def _extract_with_llm(
         f"chat_id：{chat_id}\n"
         f"source_open_id：{source_open_id}\n"
         f"mentions：{json.dumps(mention_lines, ensure_ascii=False)}\n"
+        f"known_users（名字→open_id，可用于解析消息中直接写出的人名）："
+        f"{json.dumps(known_users, ensure_ascii=False)}\n"
         f"existing_items：{json.dumps(_existing_payload(existing_items), ensure_ascii=False)}\n"
         f"近期上下文：{json.dumps(context, ensure_ascii=False)}\n"
         f"当前消息：{text}"
@@ -458,6 +465,26 @@ def _dedupe(values) -> list[str]:
         item = str(value or "").strip()
         if item and item not in result:
             result.append(item)
+    return result
+
+
+def _build_known_users(
+    source_open_id: str,
+    mentions: list[dict],
+    context: list[dict[str, Any]],
+) -> dict[str, str]:
+    """Build name -> open_id map from current mentions and context message mentions."""
+    result: dict[str, str] = {}
+    all_mentions: list[dict] = list(mentions)
+    for ctx_msg in context:
+        for mention in ctx_msg.get("mentions") or []:
+            if isinstance(mention, dict):
+                all_mentions.append(mention)
+    for mention in all_mentions:
+        open_id = str(mention.get("open_id") or "").strip()
+        name = str(mention.get("name") or mention.get("key") or "").strip().lstrip("@")
+        if open_id and name:
+            result[name] = open_id
     return result
 
 
