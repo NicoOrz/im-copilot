@@ -705,6 +705,58 @@ def _is_board_query(text: str) -> bool:
     return bool(result.is_board_query)
 
 
+def _process_audio_message(
+    file_key: str,
+    message_id: str,
+    chat_id: str,
+    lark_bot: LarkBot,
+    open_id: str = "",
+    *,
+    chat_type: str = "",
+    mentions: list[dict[str, Any]] | None = None,
+    sender_type: str = "",
+) -> None:
+    """Download and transcribe an audio message, then route as text."""
+    logger.info(
+        "audio_message start: message_id=%s chat_id=%s open_id=%s",
+        message_id,
+        chat_id,
+        open_id,
+    )
+    _ack_message(lark_bot, message_id)
+
+    audio_bytes = lark_bot.download_message_resource(message_id, file_key)
+    if not audio_bytes:
+        logger.error("audio_message download failed: message_id=%s", message_id)
+        _fail_message(lark_bot, message_id)
+        lark_bot.reply_text(message_id, "语音下载失败，请重试。")
+        return
+
+    text = lark_bot.recognize_speech(audio_bytes)
+    if not text:
+        logger.error("audio_message asr failed: message_id=%s", message_id)
+        _fail_message(lark_bot, message_id)
+        lark_bot.reply_text(message_id, "语音识别失败，请重试或改用文字。")
+        return
+
+    logger.info(
+        "audio_message asr success: message_id=%s text_len=%s text_preview=%r",
+        message_id,
+        len(text),
+        text[:80],
+    )
+    _process_message(
+        text,
+        chat_id,
+        message_id,
+        lark_bot,
+        open_id,
+        chat_type=chat_type,
+        mentions=mentions or [],
+        sender_type=sender_type,
+    )
+
+
 def _process_message(
     text: str,
     chat_id: str,
@@ -1029,17 +1081,44 @@ def on_message_receive(data: P2ImMessageReceiveV1, lark_bot: LarkBot) -> None:
 
     message = data.event.message
     content_raw = message.content or "{}"
+    msg_type = message.message_type or ""
 
     chat_id = message.chat_id or ""
     message_id = message.message_id or ""
     chat_type = message.chat_type or ""
     mentions = _mention_dicts(message)
-    text = _replace_mentions(_extract_text_content(content_raw), mentions)
     open_id = ""
     sender_type = ""
     if data.event.sender and data.event.sender.sender_id:
         open_id = data.event.sender.sender_id.open_id or ""
         sender_type = data.event.sender.sender_type or ""
+
+    if msg_type == "audio":
+        try:
+            audio_content = json.loads(content_raw)
+            file_key = audio_content.get("file_key", "")
+        except (json.JSONDecodeError, AttributeError):
+            file_key = ""
+        if not file_key:
+            logger.warning("audio message missing file_key: message_id=%s", message_id)
+            return
+        if not _mark_message_processing(message_id):
+            logger.info("Duplicate message ignored: message_id=%s", message_id)
+            return
+        if not chat_id:
+            logger.error("Missing chat_id in audio message event")
+            return
+        worker = threading.Thread(
+            target=_process_audio_message,
+            args=(file_key, message_id, chat_id, lark_bot, open_id),
+            kwargs={"chat_type": chat_type, "mentions": mentions, "sender_type": sender_type},
+            daemon=True,
+        )
+        worker.start()
+        logger.debug("Audio message worker started: message_id=%s", message_id)
+        return
+
+    text = _replace_mentions(_extract_text_content(content_raw), mentions)
     logger.debug("Message parsed: chat_id=%s message_id=%s open_id=%s text_len=%s", chat_id, message_id, open_id, len(text))
 
     if not _mark_message_processing(message_id):

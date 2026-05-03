@@ -6,8 +6,11 @@ and updating interactive cards via the Feishu OpenAPI.
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
+import string
+import random
 from typing import Any, Callable
 
 import requests
@@ -23,12 +26,19 @@ from lark_oapi.api.im.v1 import (
     CreateMessageRequestBodyBuilder,
     CreateMessageRequestBuilder,
     EmojiBuilder,
+    GetMessageResourceRequestBuilder,
     ListChatRequestBuilder,
     ListMessageRequestBuilder,
     PatchMessageRequestBodyBuilder,
     PatchMessageRequestBuilder,
     ReplyMessageRequestBodyBuilder,
     ReplyMessageRequestBuilder,
+)
+from lark_oapi.api.speech_to_text.v1 import (
+    FileRecognizeSpeechRequestBuilder,
+    FileRecognizeSpeechRequestBodyBuilder,
+    Speech,
+    FileConfig,
 )
 from lark_oapi.core.exception import ObtainAccessTokenException
 from lark_oapi.core.token import TokenManager
@@ -826,6 +836,83 @@ class LarkBot:
         except Exception as exc:
             logger.exception("patch_message unexpected error: message_id=%s", message_id)
             return {"code": -1, "msg": str(exc), "data": None}
+
+    # --------------------------------------------------------------------- #
+    # Audio / Speech-to-Text
+    # --------------------------------------------------------------------- #
+
+    def download_message_resource(self, message_id: str, file_key: str) -> bytes | None:
+        """Download an audio or file resource from a message.
+
+        Returns raw bytes on success, or None on failure.
+        """
+        logger.debug("download_message_resource start: message_id=%s file_key=%s", message_id, file_key)
+        req = (
+            GetMessageResourceRequestBuilder()
+            .message_id(message_id)
+            .file_key(file_key)
+            .type("file")
+            .build()
+        )
+        try:
+            resp = self._client.im.v1.message_resource.get(req)
+        except ObtainAccessTokenException as exc:
+            logger.error("download_message_resource auth error: %s", exc)
+            return None
+        except Exception as exc:
+            logger.exception("download_message_resource unexpected error: message_id=%s", message_id)
+            return None
+        if not resp.success():
+            logger.error(
+                "download_message_resource failed: code=%s msg=%s message_id=%s",
+                resp.code,
+                resp.msg,
+                message_id,
+            )
+            return None
+        file_content = getattr(resp, "file", None)
+        if file_content is None:
+            logger.error("download_message_resource: no file in response message_id=%s", message_id)
+            return None
+        raw = file_content.read() if hasattr(file_content, "read") else bytes(file_content)
+        logger.info("download_message_resource success: message_id=%s size=%s", message_id, len(raw))
+        return raw
+
+    def recognize_speech(self, audio_bytes: bytes) -> str | None:
+        """Recognize speech from raw PCM audio bytes via Feishu ASR API.
+
+        Returns the recognized text, or None on failure.
+        """
+        file_id = "".join(random.choices(string.ascii_lowercase + string.digits, k=16))
+        speech_b64 = base64.b64encode(audio_bytes).decode("ascii")
+        logger.debug("recognize_speech start: file_id=%s audio_size=%s", file_id, len(audio_bytes))
+
+        speech = Speech.builder().speech(speech_b64).build()
+        config = FileConfig.builder().file_id(file_id).format("pcm").engine_type("16k_auto").build()
+        body = (
+            FileRecognizeSpeechRequestBodyBuilder()
+            .speech(speech)
+            .config(config)
+            .build()
+        )
+        req = FileRecognizeSpeechRequestBuilder().request_body(body).build()
+        try:
+            resp = self._client.speech_to_text.v1.speech.file_recognize(req)
+        except ObtainAccessTokenException as exc:
+            logger.error("recognize_speech auth error: %s", exc)
+            return None
+        except Exception as exc:
+            logger.exception("recognize_speech unexpected error: file_id=%s", file_id)
+            return None
+        if not resp.success():
+            logger.error("recognize_speech failed: code=%s msg=%s", resp.code, resp.msg)
+            return None
+        text = getattr(getattr(resp, "data", None), "recognition_text", None)
+        if not text:
+            logger.warning("recognize_speech: empty recognition_text file_id=%s", file_id)
+            return None
+        logger.info("recognize_speech success: file_id=%s text_len=%s", file_id, len(text))
+        return text
 
     # --------------------------------------------------------------------- #
     # WebSocket
