@@ -33,6 +33,7 @@ WHITEBOARD_PROMPT = """{system_prompt}
 - 根据内容选择合适图类型
 - 忠实反映原始材料的关键信息和关系
 - 节点文字使用中文，简洁清晰
+- 节点文字需要分行时使用 <br/>；禁止输出字面 \\n
 """
 
 WHITEBOARD_MERMAID_PROMPT = """你是飞书白板 Mermaid 内容生成器。只输出纯 Mermaid 代码。
@@ -49,6 +50,7 @@ WHITEBOARD_MERMAID_PROMPT = """你是飞书白板 Mermaid 内容生成器。只�
 - 流程图只用于简单文字流程；步骤数超过 12 时要合并步骤，节点文字尽量不超过 8 字。
 - 判断节点只写条件关键词，不写长描述。
 - 节点文字使用中文，简洁清晰，避免长句和大段文字。
+- 节点文字需要分行时使用 <br/>；禁止输出字面 \\n。
 - 只输出 Mermaid 文本，不输出 Markdown 代码块。
 
 输出要求：
@@ -93,6 +95,7 @@ def create_whiteboard_from_mermaid(
     parent_doc_token: str = "",
     parent_doc_url: str = "",
 ) -> SkillArtifact:
+    mermaid = _normalize_mermaid_text(_strip_code_fence(str(mermaid or "")).strip())
     result: SkillArtifact = {
         "kind": "whiteboard",
         "title": title,
@@ -251,6 +254,7 @@ def _strip_code_fence(text: str) -> str:
 
 
 def _clean_mermaid(text: str) -> str:
+    text = _normalize_mermaid_text(text)
     lines = [line.rstrip() for line in text.splitlines() if line.strip()]
     if not lines:
         return "mindmap\n  root((主题))\n    要点\n"
@@ -279,9 +283,14 @@ def _clean_mermaid(text: str) -> str:
 
 
 def _short_node_text(text: str, limit: int = 16) -> str:
+    text = re.sub(r"<br\s*/?>", " ", text, flags=re.I)
     cleaned = re.sub(r"[`*_#>\[\]{}()]+", "", text).strip()
     cleaned = re.sub(r"\s+", "", cleaned)
     return cleaned[:limit]
+
+
+def _normalize_mermaid_text(text: str) -> str:
+    return text.replace("\\\\n", "<br/>").replace("\\n", "<br/>")
 
 
 def _whiteboard_token(document: dict[str, Any]) -> str:
