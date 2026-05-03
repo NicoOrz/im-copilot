@@ -106,6 +106,16 @@ def extract_and_store_todos(
     )
     for draft in drafts:
         if draft.needs_confirmation:
+            record = store_todo_draft(
+                draft,
+                chat_id=chat_id,
+                message_id=message_id,
+                source_open_id=source_open_id,
+                source=source,
+                status="awaiting_confirmation",
+            )
+            if record is not None:
+                records.append(record)
             continue
         record = store_todo_draft(
             draft,
@@ -127,6 +137,7 @@ def store_todo_draft(
     message_id: str,
     source_open_id: str,
     source: str = "feishu",
+    status: str = "pending",
 ) -> TodoRecord | None:
     record = todo_store.create(
         chat_id=chat_id,
@@ -138,6 +149,7 @@ def store_todo_draft(
         due_at=draft.due_at.isoformat(timespec="minutes"),
         remind_at=draft.remind_at.isoformat(timespec="minutes"),
         source_text=draft.source_text,
+        status=status,
     )
     if record is None:
         return None
