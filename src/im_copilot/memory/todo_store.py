@@ -153,6 +153,11 @@ class TodoStore:
     def delete(self, todo_id: int, assignee_open_id: str = "") -> bool:
         return self._set_status(todo_id, "deleted", assignee_open_id, include_duplicates=True)
 
+    def clear(self) -> int:
+        with _conn() as conn:
+            cursor = conn.execute("DELETE FROM todos")
+            return max(cursor.rowcount, 0)
+
     def mark_reminded(self, todo_id: int) -> bool:
         return self._set_status(todo_id, "reminded", include_duplicates=True)
 

@@ -56,6 +56,7 @@ def _handle_help(args: str, chat_id: str, thread_id: str, source: str, user_id: 
         "/new - 开始新对话（重置当前会话上下文）\n"
         "/todo - 查看待办\n"
         "/todo board - 查看群共享看板\n"
+        "/todo clear - 清空所有待办（调试）\n"
         "/todo done <序号> - 标记完成\n"
         "/todo delete <序号> - 删除待办\n"
         "/todo sync - 从今日已收到群消息重新提取待办\n"
@@ -83,6 +84,10 @@ def _handle_todo(args: str, chat_id: str, thread_id: str, source: str, user_id: 
     if action == "sync":
         count = sync_today(chat_id)
         return CommandResult(True, "todo", f"已从今日本地消息提取 {count} 个待办。")
+
+    if action == "clear":
+        count = todo_store.clear()
+        return CommandResult(True, "todo", f"已清空 {count} 个待办。")
 
     if source == "feishu_group":
         return CommandResult(True, "todo", "个人待办仅在单聊中展示。群内可使用 /todo board 查看共享看板。")
