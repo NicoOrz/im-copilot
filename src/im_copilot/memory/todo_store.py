@@ -209,7 +209,7 @@ class TodoStore:
                        WHERE assignee_open_id = ?
                          AND title = ?
                          AND due_at = ?
-                         AND status IN ('pending', 'reminded')""",
+                         AND status IN ('pending', 'reminded', 'awaiting_confirmation')""",
                     (
                         status,
                         now,
@@ -233,13 +233,11 @@ class TodoStore:
         return _row_to_todo(row) if row else None
 
     def update_status(self, todo_id: int, status: str) -> bool:
-        now = time.time()
-        with _conn() as conn:
-            cursor = conn.execute(
-                "UPDATE todos SET status = ?, updated_at = ? WHERE id = ?",
-                (status, now, todo_id),
-            )
-        return cursor.rowcount > 0
+        from typing import get_args
+        valid = get_args(TodoStatus)
+        if status not in valid:
+            raise ValueError(f"Invalid status {status!r}. Must be one of {valid}")
+        return self._set_status(todo_id, status, include_duplicates=True)
 
 
 def _row_to_todo(row: sqlite3.Row) -> TodoRecord:
