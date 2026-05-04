@@ -814,7 +814,11 @@ def _process_message(
 ) -> None:
     from im_copilot.commands import parse_command, execute_command
     from im_copilot.memory.group_board_extractor import extract_and_store_group_board_items
-    from im_copilot.memory.todo_extractor import extract_and_store_todos
+    from im_copilot.memory.todo_extractor import (
+        assemble_window,
+        extract_and_store_todos_from_window,
+        load_open_todos_brief,
+    )
 
     clean_text = _AT_MENTION_RE.sub("", text.strip())
     mentions = mentions or []
@@ -844,7 +848,7 @@ def _process_message(
                 message_id,
                 open_id,
             )
-            record_event(
+            event_id = record_event(
                 chat_id,
                 "feishu",
                 "user_message",
@@ -857,12 +861,12 @@ def _process_message(
                     "mentions": mentions,
                 },
             )
-            todo_records = extract_and_store_todos(
-                text,
+            todo_records = extract_and_store_todos_from_window(
                 chat_id=chat_id,
                 message_id=message_id,
                 source_open_id=open_id,
-                mentions=mentions,
+                window=assemble_window(chat_id, event_id),
+                existing_open_todos=load_open_todos_brief(chat_id),
                 is_bot_request=False,
             )
             _send_todo_confirmation_cards(lark_bot, todo_records, source_open_id=open_id)

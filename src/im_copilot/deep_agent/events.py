@@ -17,6 +17,7 @@ EventType = Literal[
     "calendar_event_created",
     "summary_created",
     "assistant_message",
+    "todo_updated",
     "error",
 ]
 
@@ -30,6 +31,7 @@ EVENT_TYPES: set[str] = {
     "calendar_event_created",
     "summary_created",
     "assistant_message",
+    "todo_updated",
     "error",
 }
 
@@ -129,6 +131,33 @@ def iter_user_messages_for_chat(chat_id: str, since_ts: float) -> list[dict[str,
     ]
 
 
+def recent_user_messages_for_chat(
+    chat_id: str,
+    *,
+    before_event_id: int | None = None,
+    limit: int,
+    since_ts: float = 0.0,
+) -> list[dict[str, Any]]:
+    clauses = ["event_type = 'user_message'", "created_at >= ?"]
+    params: list[Any] = [since_ts]
+    if before_event_id is not None:
+        clauses.append("id <= ?")
+        params.append(before_event_id)
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT id, thread_id, source, event_type, payload_json, created_at "
+            f"FROM agent_events WHERE {' AND '.join(clauses)} "
+            "ORDER BY id ASC",
+            params,
+        ).fetchall()
+    events = [_row_to_event(row) for row in rows]
+    filtered = [
+        event for event in events
+        if event.get("payload", {}).get("chat_id") == chat_id
+    ]
+    return filtered[-limit:] if limit > 0 else filtered
+
+
 def history_for_thread(thread_id: str) -> list[dict[str, Any]]:
     state: dict[str, Any] = {
         "artifacts": {},
@@ -172,6 +201,18 @@ def history_for_thread(thread_id: str) -> list[dict[str, Any]]:
         elif event_type == "todo_detected":
             todos = list(state.get("todos", []))
             todos.append(payload)
+            state["todos"] = todos
+        elif event_type == "todo_updated":
+            todos = list(state.get("todos", []))
+            todo_id = payload.get("id")
+            replaced = False
+            for index, todo in enumerate(todos):
+                if todo.get("id") == todo_id:
+                    todos[index] = payload
+                    replaced = True
+                    break
+            if not replaced:
+                todos.append(payload)
             state["todos"] = todos
         elif event_type == "tool_call":
             state["last_tool"] = payload

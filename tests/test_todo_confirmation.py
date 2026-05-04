@@ -59,7 +59,7 @@ def test_update_status_to_deleted(store):
     assert updated.status == "deleted"
 
 from unittest.mock import patch
-from im_copilot.memory.todo_extractor import extract_and_store_todos
+from im_copilot.memory.todo_extractor import extract_and_store_todos_from_window, WindowMessage
 
 def test_needs_confirmation_stored_as_awaiting(tmp_path, monkeypatch):
     db = str(tmp_path / "test2.sqlite")
@@ -80,14 +80,24 @@ def test_needs_confirmation_stored_as_awaiting(tmp_path, monkeypatch):
     )
 
     with patch(
-        "im_copilot.memory.todo_extractor.extract_todos_from_message",
+        "im_copilot.memory.todo_extractor.extract_todos_from_window",
         return_value=[draft],
     ):
-        records = extract_and_store_todos(
-            "赵磊周五18:00前给数据口径",
+        records = extract_and_store_todos_from_window(
             chat_id="chat1",
             message_id="msg_confirm",
             source_open_id="ou_sender",
+            window=[
+                WindowMessage(
+                    message_id="msg_confirm",
+                    open_id="ou_sender",
+                    name="",
+                    text="赵磊周五18:00前给数据口径",
+                    ts=0,
+                    is_trigger=True,
+                )
+            ],
+            existing_open_todos=[],
         )
 
     awaiting = [r for r in records if r.status == "awaiting_confirmation"]

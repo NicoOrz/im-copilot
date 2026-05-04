@@ -11,7 +11,7 @@ from im_copilot.graph.nodes.verify_node import verify_node
 from im_copilot.graph.nodes.whiteboard_node import whiteboard_node
 from im_copilot.lark_handlers import _unverified_artifact_link_lines
 from im_copilot.lark_handlers import _meeting_card_source_summary
-from im_copilot.memory.todo_extractor import extract_todos_from_message
+from im_copilot.memory.todo_extractor import TodoExtractionOutput, WindowMessage, extract_todos_from_window
 from im_copilot.skills.config import get_skill_config
 from im_copilot.skills.registry import get_skill, planner_capability_text
 
@@ -179,10 +179,19 @@ class LarkReplyGuardTests(unittest.TestCase):
 class TodoExtractorTests(unittest.TestCase):
     @patch("im_copilot.memory.todo_extractor.invoke_structured")
     def test_bot_artifact_request_does_not_create_personal_todo(self, mock_invoke):
-        mock_invoke.return_value = MagicMock(is_todo=False, scope="none", confidence=0.0)
-        extract_todos_from_message(
-            "帮我们汇总讨论，生成一份技术方案文档，并在下周一前生成汇报 PPT",
-            source_open_id="ou_sender",
+        mock_invoke.return_value = TodoExtractionOutput(items=[])
+        extract_todos_from_window(
+            [
+                WindowMessage(
+                    message_id="m1",
+                    open_id="ou_sender",
+                    name="",
+                    text="帮我们汇总讨论，生成一份技术方案文档，并在下周一前生成汇报 PPT",
+                    ts=0,
+                    is_trigger=True,
+                )
+            ],
+            existing_open_todos=[],
             is_bot_request=True,
         )
 

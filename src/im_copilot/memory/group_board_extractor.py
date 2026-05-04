@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 from im_copilot.deep_agent.events import iter_user_messages_for_chat, record_event
 from im_copilot.llm import invoke_structured
 from im_copilot.memory.group_board_store import GroupBoardItem, group_board_store
-from im_copilot.memory.todo_extractor import TodoDraft, store_todo_draft
+from im_copilot.memory.todo_store import todo_store
 
 _TZ = ZoneInfo("Asia/Hong_Kong")
 _MIN_CONFIDENCE = 0.65
@@ -182,22 +182,39 @@ def extract_and_store_group_board_items(
 
         assignee = candidate.personal_todo_assignee_open_id.strip() or candidate.owner_open_id.strip()
         if candidate.should_create_personal_todo and assignee and due_at:
-            store_todo_draft(
-                TodoDraft(
-                    assignee_open_id=assignee,
-                    title=(candidate.title or _title(clean))[:80],
-                    action=(candidate.title or _title(clean))[:80],
-                    due_at=due_at,
-                    remind_at=_remind_at(due_at),
-                    source_text=clean,
-                    confidence=candidate.confidence,
-                    needs_confirmation=False,
-                ),
+            personal = todo_store.create(
                 chat_id=chat_id,
                 message_id=message_id,
                 source_open_id=source_open_id,
-                source=source,
+                assignee_open_id=assignee,
+                title=(candidate.title or _title(clean))[:80],
+                action=(candidate.title or _title(clean))[:80],
+                due_at=due_at.isoformat(timespec="minutes"),
+                remind_at=_remind_at(due_at).isoformat(timespec="minutes"),
+                source_text=clean,
+                status="pending",
             )
+            if personal:
+                record_event(
+                    chat_id,
+                    source,
+                    "todo_detected",
+                    {
+                        "id": personal.id,
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                        "source_open_id": source_open_id,
+                        "assignee_open_id": personal.assignee_open_id,
+                        "title": personal.title,
+                        "action": personal.action,
+                        "due_at": personal.due_at,
+                        "remind_at": personal.remind_at,
+                        "status": personal.status,
+                        "source_text": personal.source_text,
+                        "confidence": candidate.confidence,
+                        "needs_confirmation": False,
+                    },
+                )
 
     return BoardExtractionResult(created, _dedupe(confirmation_recipients))
 

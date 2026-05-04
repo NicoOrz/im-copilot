@@ -232,6 +232,38 @@ class TodoStore:
             ).fetchone()
         return _row_to_todo(row) if row else None
 
+    def update_fields(
+        self,
+        todo_id: int,
+        *,
+        title: str | None = None,
+        action: str | None = None,
+        due_at: str | None = None,
+        remind_at: str | None = None,
+    ) -> TodoRecord | None:
+        values = {
+            "title": title,
+            "action": action,
+            "due_at": due_at,
+            "remind_at": remind_at,
+        }
+        assignments = [f"{field} = ?" for field, value in values.items() if value is not None]
+        params = [value for value in values.values() if value is not None]
+        now = time.time()
+        with _conn() as conn:
+            if assignments:
+                cursor = conn.execute(
+                    f"UPDATE todos SET {', '.join(assignments)}, updated_at = ? WHERE id = ?",
+                    [*params, now, todo_id],
+                )
+                if cursor.rowcount == 0:
+                    return None
+            row = conn.execute(
+                "SELECT * FROM todos WHERE id = ?",
+                (todo_id,),
+            ).fetchone()
+        return _row_to_todo(row) if row else None
+
     def update_status(self, todo_id: int, status: str) -> bool:
         from typing import get_args
         valid = get_args(TodoStatus)

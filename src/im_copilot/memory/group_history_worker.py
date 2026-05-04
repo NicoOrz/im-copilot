@@ -12,7 +12,11 @@ from im_copilot.deep_agent.events import record_event
 from im_copilot.lark_bot import LarkBot
 from im_copilot.memory.group_board_extractor import extract_and_store_group_board_items
 from im_copilot.memory.group_chat_store import group_chat_store
-from im_copilot.memory.todo_extractor import extract_and_store_todos
+from im_copilot.memory.todo_extractor import (
+    assemble_window,
+    extract_and_store_todos_from_window,
+    load_open_todos_brief,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -150,7 +154,7 @@ def _process_history_message(lark_bot: LarkBot, message: dict[str, Any]) -> bool
     if not _mark_message_processing(message_id):
         return False
 
-    record_event(
+    event_id = record_event(
         chat_id,
         "feishu_history",
         "user_message",
@@ -163,13 +167,13 @@ def _process_history_message(lark_bot: LarkBot, message: dict[str, Any]) -> bool
             "mentions": mentions,
         },
     )
-    todo_records = extract_and_store_todos(
-        text,
+    todo_records = extract_and_store_todos_from_window(
         chat_id=chat_id,
         message_id=message_id,
         source_open_id=source_open_id,
         source="feishu_history",
-        mentions=mentions,
+        window=assemble_window(chat_id, event_id),
+        existing_open_todos=load_open_todos_brief(chat_id),
         is_bot_request=False,
     )
     if todo_records:
