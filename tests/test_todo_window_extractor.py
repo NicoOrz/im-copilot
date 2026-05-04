@@ -43,7 +43,7 @@ def _item(**kwargs) -> TodoExtractionItem:
         "links_to_existing_id": "",
         "assignee_open_id": "ou_liran",
         "title": "整理技术限制说明",
-        "action": "整理技术限制说明",
+        "action_phrase": "整理技术限制说明",
         "due_at": "2026-05-05T10:00+08:00",
         "remind_at": "",
         "confidence": 0.9,
@@ -65,7 +65,7 @@ def test_window_extraction_returns_create_update_and_filters_invalid_items(monke
             id=7,
             assignee_open_id="ou_liran",
             title="整理技术限制说明",
-            action="整理技术限制说明",
+            action_phrase="整理技术限制说明",
             due_at="2026-05-04T18:00+08:00",
             status="pending",
         )
@@ -73,7 +73,7 @@ def test_window_extraction_returns_create_update_and_filters_invalid_items(monke
     monkeypatch.setattr(
         "im_copilot.memory.todo_extractor.invoke_structured",
         lambda *args, **kwargs: _output(
-            _item(links_to_existing_id="", title="整理评审材料", action="整理评审材料"),
+            _item(links_to_existing_id="", title="整理评审材料", action_phrase="整理评审材料"),
             _item(links_to_existing_id="7", confidence=0.2),
             _item(is_todo=False),
             _item(assignee_open_id="ou_other"),
@@ -150,7 +150,7 @@ def test_tmp_md_window_extraction_creates_and_updates_todos(db_env, monkeypatch)
         _item(
             assignee_open_id="ou_zhao",
             title="提交数据口径",
-            action="提交数据口径",
+            action_phrase="提交数据口径",
             due_at="2026-05-08T18:00+08:00",
         )
     )
@@ -158,7 +158,7 @@ def test_tmp_md_window_extraction_creates_and_updates_todos(db_env, monkeypatch)
         _item(
             assignee_open_id="ou_chen",
             title="整理演示风格参考",
-            action="整理演示风格参考",
+            action_phrase="整理演示风格参考",
             due_at="2026-05-05T15:00+08:00",
         )
     )
@@ -166,7 +166,7 @@ def test_tmp_md_window_extraction_creates_and_updates_todos(db_env, monkeypatch)
         _item(
             assignee_open_id="ou_liran",
             title="整理技术限制说明",
-            action="整理技术限制说明",
+            action_phrase="整理技术限制说明",
             due_at="2026-05-04T18:00+08:00",
         )
     )
@@ -175,7 +175,7 @@ def test_tmp_md_window_extraction_creates_and_updates_todos(db_env, monkeypatch)
             links_to_existing_id="3",
             assignee_open_id="ou_liran",
             title="整理技术限制说明",
-            action="整理技术限制说明",
+            action_phrase="整理技术限制说明",
             due_at="2026-05-05T12:00+08:00",
         )
     )
@@ -184,7 +184,7 @@ def test_tmp_md_window_extraction_creates_and_updates_todos(db_env, monkeypatch)
             links_to_existing_id="3",
             assignee_open_id="ou_liran",
             title="整理技术限制说明",
-            action="整理技术限制说明",
+            action_phrase="整理技术限制说明",
             due_at="2026-05-05T10:00+08:00",
         )
     )
@@ -246,3 +246,188 @@ def test_tmp_md_window_extraction_creates_and_updates_todos(db_env, monkeypatch)
     ]
     assert wang_deadline == []
     assert 2 <= len(todos) <= 4
+
+
+def test_mention_assignment_false_output_is_ignored_and_true_output_is_stored(db_env, monkeypatch):
+    chat_id = "oc_mention"
+    window = [
+        WindowMessage(
+            "m1",
+            "ou_wang",
+            "王敏",
+            "@何添 今天下班前整理技术限制说明",
+            _NOW.timestamp(),
+            True,
+            mentions=({"open_id": "ou_hetian", "name": "何添", "key": "@_user_1"},),
+        )
+    ]
+    responses = iter([
+        _output(_item(is_todo=False, assignee_open_id="ou_hetian")),
+        _output(
+            _item(
+                assignee_open_id="ou_hetian",
+                title="整理技术限制说明",
+                action_phrase="整理技术限制说明",
+                due_at="2026-05-04T18:00+08:00",
+            )
+        ),
+    ])
+    monkeypatch.setattr(
+        "im_copilot.memory.todo_extractor.invoke_structured",
+        lambda *args, **kwargs: next(responses),
+    )
+
+    ignored = extract_todos_from_window(window, existing_open_todos=[], now=_NOW)
+    stored = extract_and_store_todos_from_window(
+        chat_id=chat_id,
+        message_id="m1",
+        source_open_id="ou_wang",
+        window=window,
+        existing_open_todos=[],
+        now=_NOW,
+    )
+
+    assert ignored == []
+    assert len(stored) == 1
+    assert stored[0].assignee_open_id == "ou_hetian"
+    assert stored[0].action_phrase == "整理技术限制说明"
+
+
+def test_linked_update_keeps_correct_assignee(db_env, monkeypatch):
+    store = TodoStore()
+    existing = store.create(
+        chat_id="oc_link",
+        message_id="m0",
+        source_open_id="ou_hetian",
+        assignee_open_id="ou_hetian",
+        title="整理技术限制说明",
+        action_phrase="整理技术限制说明",
+        due_at="2026-05-04T18:00+08:00",
+        remind_at="2026-05-04T17:50+08:00",
+        source_text="我今天下班前整理技术限制说明",
+    )
+    assert existing is not None
+    window = [
+        WindowMessage("m0", "ou_hetian", "何添", "我今天下班前整理技术限制说明", _NOW.timestamp(), False),
+        WindowMessage(
+            "m1",
+            "ou_wang",
+            "王敏",
+            "@何添 那就明早 10 点前。",
+            _NOW.timestamp(),
+            True,
+            mentions=({"open_id": "ou_hetian", "name": "何添", "key": "@_user_1"},),
+        ),
+    ]
+    monkeypatch.setattr(
+        "im_copilot.memory.todo_extractor.invoke_structured",
+        lambda *args, **kwargs: _output(
+            _item(
+                links_to_existing_id=str(existing.id),
+                assignee_open_id="ou_hetian",
+                title="整理技术限制说明",
+                action_phrase="整理技术限制说明",
+                due_at="2026-05-05T10:00+08:00",
+            )
+        ),
+    )
+
+    records = extract_and_store_todos_from_window(
+        chat_id="oc_link",
+        message_id="m1",
+        source_open_id="ou_wang",
+        window=window,
+        existing_open_todos=load_open_todos_brief("oc_link"),
+        now=_NOW,
+    )
+
+    assert len(records) == 1
+    assert records[0].id == existing.id
+    assert records[0].assignee_open_id == "ou_hetian"
+    assert records[0].due_at == "2026-05-05T10:00+08:00"
+    assert len(store.list(chat_id="oc_link", status="")) == 1
+
+
+def test_action_phrase_is_stored_and_can_be_empty(db_env, monkeypatch):
+    window = [
+        WindowMessage("m1", "ou_wang", "王敏", "两项待办", _NOW.timestamp(), True),
+    ]
+    monkeypatch.setattr(
+        "im_copilot.memory.todo_extractor.invoke_structured",
+        lambda *args, **kwargs: _output(
+            _item(
+                assignee_open_id="ou_wang",
+                title="提交数据口径",
+                action_phrase="提交数据口径",
+                due_at="2026-05-08T18:00+08:00",
+            ),
+            _item(
+                assignee_open_id="ou_wang",
+                title="确认隐私权限边界",
+                action_phrase="",
+                due_at="2026-05-09T18:00+08:00",
+            ),
+        ),
+    )
+
+    records = extract_and_store_todos_from_window(
+        chat_id="oc_phrase",
+        message_id="m1",
+        source_open_id="ou_wang",
+        window=window,
+        existing_open_todos=[],
+        now=_NOW,
+    )
+
+    assert [record.action_phrase for record in records] == ["提交数据口径", ""]
+
+
+def test_links_to_existing_id_updates_and_empty_link_creates(db_env, monkeypatch):
+    store = TodoStore()
+    existing = store.create(
+        chat_id="oc_mix",
+        message_id="m0",
+        source_open_id="ou_liran",
+        assignee_open_id="ou_liran",
+        title="整理技术限制说明",
+        action_phrase="整理技术限制说明",
+        due_at="2026-05-04T18:00+08:00",
+        remind_at="2026-05-04T17:50+08:00",
+        source_text="整理技术限制说明",
+    )
+    assert existing is not None
+    window = [
+        WindowMessage("m1", "ou_liran", "李然", "更新技术说明，并新增评审材料", _NOW.timestamp(), True),
+    ]
+    monkeypatch.setattr(
+        "im_copilot.memory.todo_extractor.invoke_structured",
+        lambda *args, **kwargs: _output(
+            _item(
+                links_to_existing_id=str(existing.id),
+                assignee_open_id="ou_liran",
+                title="整理技术限制说明",
+                action_phrase="整理技术限制说明",
+                due_at="2026-05-05T10:00+08:00",
+            ),
+            _item(
+                links_to_existing_id="",
+                assignee_open_id="ou_liran",
+                title="整理评审材料",
+                action_phrase="整理评审材料",
+                due_at="2026-05-06T10:00+08:00",
+            ),
+        ),
+    )
+
+    records = extract_and_store_todos_from_window(
+        chat_id="oc_mix",
+        message_id="m1",
+        source_open_id="ou_liran",
+        window=window,
+        existing_open_todos=load_open_todos_brief("oc_mix"),
+        now=_NOW,
+    )
+
+    assert [record.id for record in records] == [existing.id, existing.id + 1]
+    assert records[0].due_at == "2026-05-05T10:00+08:00"
+    assert records[1].title == "整理评审材料"

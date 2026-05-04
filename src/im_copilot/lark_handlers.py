@@ -781,7 +781,7 @@ def _send_todo_confirmation_cards(
         card = create_todo_confirm_card(
             todo_id=record.id,
             title=record.title,
-            action=record.action,
+            action_phrase=record.action_phrase,
             due_at=record.due_at,
             source_text=record.source_text,
             source_open_id=source_open_id,

@@ -419,7 +419,7 @@ def _at_tag(open_id: str) -> str:
 def create_todo_confirm_card(
     todo_id: int,
     title: str,
-    action: str,
+    action_phrase: str,
     due_at: str,
     source_text: str,
     source_open_id: str,
@@ -430,7 +430,7 @@ def create_todo_confirm_card(
     Args:
         todo_id: The unique identifier for the todo.
         title: The todo title.
-        action: The action to be taken.
+        action_phrase: The todo action phrase.
         due_at: The deadline in ISO format (e.g., "2026-05-08T18:00").
         source_text: The original source message text.
         source_open_id: The open_id of the user who created the todo.
@@ -443,7 +443,7 @@ def create_todo_confirm_card(
     source_excerpt = source_text[:100] + "…" if len(source_text) > 100 else source_text
     content = (
         f"**事项：** {title}\n"
-        f"**动作：** {action}\n"
+        f"**动作：** {action_phrase}\n"
         f"**截止时间：** {due_at}\n"
         f"{assignee_line}"
         f"**来源消息：** {source_excerpt}"

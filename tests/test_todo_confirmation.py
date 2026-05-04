@@ -1,3 +1,5 @@
+import sqlite3
+
 import pytest
 from im_copilot.memory.todo_store import TodoStore, TodoStatus
 
@@ -14,7 +16,7 @@ def test_create_awaiting_confirmation(store):
         source_open_id="user1",
         assignee_open_id="user2",
         title="测试待办",
-        action="完成报告",
+        action_phrase="完成报告",
         due_at="2026-05-10T18:00",
         remind_at="2026-05-10T17:00",
         source_text="赵磊周五前给报告",
@@ -26,7 +28,7 @@ def test_create_awaiting_confirmation(store):
 def test_get_by_id(store):
     record = store.create(
         chat_id="chat1", message_id="msg2", source_open_id="u1",
-        assignee_open_id="u2", title="T", action="A",
+        assignee_open_id="u2", title="T", action_phrase="A",
         due_at="2026-05-10T18:00", remind_at="2026-05-10T17:00",
         source_text="src", status="awaiting_confirmation",
     )
@@ -37,7 +39,7 @@ def test_get_by_id(store):
 def test_update_status_to_pending(store):
     record = store.create(
         chat_id="chat1", message_id="msg3", source_open_id="u1",
-        assignee_open_id="u2", title="T2", action="A2",
+        assignee_open_id="u2", title="T2", action_phrase="A2",
         due_at="2026-05-10T18:00", remind_at="2026-05-10T17:00",
         source_text="src", status="awaiting_confirmation",
     )
@@ -49,7 +51,7 @@ def test_update_status_to_pending(store):
 def test_update_status_to_deleted(store):
     record = store.create(
         chat_id="chat1", message_id="msg4", source_open_id="u1",
-        assignee_open_id="u2", title="T3", action="A3",
+        assignee_open_id="u2", title="T3", action_phrase="A3",
         due_at="2026-05-10T18:00", remind_at="2026-05-10T17:00",
         source_text="src", status="awaiting_confirmation",
     )
@@ -71,7 +73,7 @@ def test_needs_confirmation_stored_as_awaiting(tmp_path, monkeypatch):
     draft = TodoDraft(
         assignee_open_id="ou_abc",
         title="给数据口径",
-        action="提交数据口径文档",
+        action_phrase="提交数据口径文档",
         due_at=datetime(2026, 5, 8, 18, 0, tzinfo=timezone.utc),
         remind_at=datetime(2026, 5, 8, 17, 0, tzinfo=timezone.utc),
         source_text="赵磊周五18:00前给数据口径",
@@ -110,7 +112,7 @@ def test_create_todo_confirm_card_structure():
     card = create_todo_confirm_card(
         todo_id=42,
         title="给数据口径",
-        action="提交数据口径文档",
+        action_phrase="提交数据口径文档",
         due_at="2026-05-08T18:00",
         source_text="赵磊周五18:00前给数据口径",
         source_open_id="ou_sender",
@@ -137,7 +139,7 @@ def test_confirm_todo_action_updates_status(tmp_path, monkeypatch):
 
     record = store.create(
         chat_id="chat1", message_id="msg_ca", source_open_id="u1",
-        assignee_open_id="u2", title="T_ca", action="A_ca",
+        assignee_open_id="u2", title="T_ca", action_phrase="A_ca",
         due_at="2026-05-10T18:00", remind_at="2026-05-10T17:00",
         source_text="src", status="awaiting_confirmation",
     )
@@ -155,7 +157,7 @@ def test_reject_todo_action_deletes(tmp_path, monkeypatch):
 
     record = store.create(
         chat_id="chat1", message_id="msg_ra", source_open_id="u1",
-        assignee_open_id="u2", title="T_ra", action="A_ra",
+        assignee_open_id="u2", title="T_ra", action_phrase="A_ra",
         due_at="2026-05-10T18:00", remind_at="2026-05-10T17:00",
         source_text="src", status="awaiting_confirmation",
     )
@@ -165,3 +167,60 @@ def test_reject_todo_action_deletes(tmp_path, monkeypatch):
     assert ok is True
     updated = store.get_by_id(record.id)
     assert updated.status == "deleted"
+
+def test_renames_old_action_column_to_action_phrase(tmp_path, monkeypatch):
+    db = str(tmp_path / "old_action.sqlite")
+    monkeypatch.setenv("TODO_DB", db)
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            """
+            CREATE TABLE todos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                source_open_id TEXT NOT NULL,
+                assignee_open_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                action TEXT NOT NULL,
+                due_at TEXT NOT NULL,
+                remind_at TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                source_text TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO todos
+                (chat_id, message_id, source_open_id, assignee_open_id, title, action,
+                 due_at, remind_at, status, source_text, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "chat1",
+                "msg_old",
+                "u1",
+                "u2",
+                "T_old",
+                "A_old",
+                "2026-05-10T18:00",
+                "2026-05-10T17:00",
+                "pending",
+                "src",
+                1.0,
+                1.0,
+            ),
+        )
+
+    records = TodoStore().list(chat_id="chat1", status="")
+    TodoStore().list(chat_id="chat1", status="")
+
+    with sqlite3.connect(db) as conn:
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(todos)")]
+
+    assert "action" not in columns
+    assert "action_phrase" in columns
+    assert len(records) == 1
+    assert records[0].action_phrase == "A_old"

@@ -38,7 +38,7 @@ class ExistingTodoBrief:
     id: int
     assignee_open_id: str
     title: str
-    action: str
+    action_phrase: str
     due_at: str
     status: str
 
@@ -48,7 +48,7 @@ class TodoExtractionItem(BaseModel):
     links_to_existing_id: str = ""
     assignee_open_id: str = ""
     title: str = ""
-    action: str = ""
+    action_phrase: str = ""
     due_at: str = ""
     remind_at: str = ""
     confidence: float = 0.0
@@ -65,7 +65,7 @@ class TodoExtractionOutput(BaseModel):
 class TodoDraft:
     assignee_open_id: str
     title: str
-    action: str
+    action_phrase: str
     due_at: datetime
     remind_at: datetime
     source_text: str
@@ -77,7 +77,7 @@ class TodoDraft:
 class TodoUpdate:
     existing_id: int
     title: str
-    action: str
+    action_phrase: str
     due_at: datetime | None
     remind_at: datetime | None
     source_text: str
@@ -144,7 +144,7 @@ def load_open_todos_brief(chat_id: str) -> list[ExistingTodoBrief]:
             id=record.id,
             assignee_open_id=record.assignee_open_id,
             title=record.title,
-            action=record.action,
+            action_phrase=record.action_phrase,
             due_at=record.due_at,
             status=record.status,
         )
@@ -198,13 +198,13 @@ def extract_todos_from_window(
         due_at = _parse_iso_time(item.due_at)
         remind_at = _parse_iso_time(item.remind_at) or _default_remind_at(due_at)
         title = item.title.strip()
-        action = item.action.strip()
+        action_phrase = item.action_phrase.strip()
         if link_id:
             results.append(
                 TodoUpdate(
                     existing_id=int(link_id),
                     title=title,
-                    action=action,
+                    action_phrase=action_phrase,
                     due_at=due_at,
                     remind_at=remind_at,
                     source_text=source_text,
@@ -214,13 +214,13 @@ def extract_todos_from_window(
             )
             continue
 
-        if not assignee or not title or not action or due_at is None or remind_at is None:
+        if not assignee or not title or due_at is None or remind_at is None:
             continue
         results.append(
             TodoDraft(
                 assignee_open_id=assignee,
                 title=title[:80],
-                action=action[:80],
+                action_phrase=action_phrase[:80],
                 due_at=due_at,
                 remind_at=remind_at,
                 source_text=source_text,
@@ -254,7 +254,7 @@ def extract_and_store_todos_from_window(
             record = todo_store.update_fields(
                 item.existing_id,
                 title=item.title or None,
-                action=item.action or None,
+                action_phrase=item.action_phrase or None,
                 due_at=_iso_minutes(item.due_at) if item.due_at else None,
                 remind_at=_iso_minutes(item.remind_at) if item.remind_at else None,
             )
@@ -276,7 +276,7 @@ def extract_and_store_todos_from_window(
             source_open_id=source_open_id,
             assignee_open_id=item.assignee_open_id,
             title=item.title,
-            action=item.action,
+            action_phrase=item.action_phrase,
             due_at=item.due_at.isoformat(timespec="minutes"),
             remind_at=item.remind_at.isoformat(timespec="minutes"),
             source_text=item.source_text,
@@ -305,15 +305,37 @@ def _invoke_window_llm(
     prompt = (
         "你是群聊待办抽取器，输入是一段对话窗口和当前 chat 内未完成待办列表。\n"
         "只为触发消息或它直接修改、确认的内容输出新待办或更新已有待办。\n"
-        "窗口前段已经被覆盖、已经被解决、或已经在 existing_open_todos 里出现过的语义同一事项，"
-        "必须用 links_to_existing_id 引用对应 id，不能新建。\n"
         "assignee_open_id 必须出自窗口内可选 open_id 集合，集合包含消息发送者和 mentions 中的 open_id。\n"
-        "如果触发消息只是回应或确认了之前别人的承诺，assignee 必须是真正承诺人。\n"
+        "如果触发消息里同时给出了被指派人、指派语义动词、截止时间或可推断的截止三要素，"
+        "必须输出 is_todo=true，title 为该任务的具体动作短语；不要因为细节不全输出 false。"
+        "指派语义包括但不限于动词式祈使（“补”、“出”、“准备”、“提交”等被语义识别为请求行动的句式），"
+        "但识别只能凭语义，不要靠关键词列表。"
+        "反例：触发消息只是闲聊、表态、回复“收到”/“好的”/“可以”且没有引入新可执行内容，输出 is_todo=false。\n"
+        "选 assignee 的优先级，从高到低："
+        "1. 如果触发消息内含 @ mention，且消息语义是把任务交给被提及人或讨论被提及人需做的事，"
+        "assignee 必须是被提及人。"
+        "2. 如果触发消息是在确认/调整某个先前承诺（典型：“那就明早10点前”、“OK”、“行”），"
+        "回到窗口里找出真正的承诺者，assignee 必须是承诺者，不能是当前说话人。"
+        "3. 如果触发消息是说话人对自己的承诺/计划（典型：“我来准备...”），assignee = 说话人。"
+        "4. 任何情况下 assignee_open_id 必须出自窗口 open_id 白名单。"
+        "反例（必须避免）：消息是“@A 那就明早10点前”，assignee 选成说话人 B 是错的；"
+        "正确：assignee=A，并 link 到 A 之前承诺的那条 todo。\n"
+        "title 必须是具体动作短语，包含动词和宾语；禁止输出占位语句，例如“X的待办”“完成相关任务”。\n"
+        "action_phrase 是该待办对应的动作短语（动词+宾语），用于在卡片或提醒里清晰展示要做什么。"
+        "范例：“提交 Q2 数据口径”、“补一页效率数据到 PPT”、“确认隐私权限边界”。"
+        "绝对不要输出 create / update / new 这种操作动词，那不是动作描述。\n"
+        "links_to_existing_id 仅当触发消息和某条 existing todo 是严格语义上同一件事"
+        "（同一个负责人 + 同一个动作 + 不同的截止时间或细节微调）时才使用，"
+        "作用是更新该 todo 的 due_at / 细节。"
+        "以下情况禁止使用 links_to_existing_id：触发消息引入了一个新的子任务（即便主题相关），"
+        "例如 existing 17=\"准备方案和PPT\" / 触发=\"赵磊补一页效率数据\" 时应新建 todo for 赵磊，"
+        "不要改 17；触发消息是不同负责人对相关主题的独立工作；触发消息只是讨论、表态、评论，"
+        "不是对既有承诺的具体修改。"
+        "反例（必须避免）：把所有“汇报准备”相关讨论都 link 到同一条 master todo 让其 title 滚雪球。\n"
+        "如果窗口内信息不足以判断动作内容，输出 is_todo=false，不要硬凑 title 或 action_phrase。\n"
+        "如果 existing_open_todos 里没有对应事项，但窗口足以判断动作内容和承诺人，可以新建并归给真正承诺人。\n"
         "如果触发消息只是寒暄、表态、确认时间，且对应承诺已在 existing_open_todos 里，"
         "输出 is_todo=true 并设置 links_to_existing_id，用输出字段表达需要变更的时间或内容。\n"
-        "如果 existing_open_todos 里没有对应事项，但窗口足以判断动作内容和承诺人，可以新建并归给真正承诺人。\n"
-        "如果窗口内信息不足以判断动作内容，输出 is_todo=false，不要硬凑 title 或 action。\n"
-        "title 必须是具体动作短语，包含动词和宾语；禁止输出占位语句，例如“X的待办”“完成相关任务”。\n"
         "如果 is_bot_request=true，表示用户在要求机器人生成文档、PPT、画板、总结或执行工具；"
         "这类请求由 Agent 执行，不创建个人待办，除非明确为某个真实成员独立创建待办。\n"
         "输出 items 数组；每个 item 对应一个新待办、一个已有待办更新，或一个明确丢弃判断。\n\n"
@@ -468,7 +490,7 @@ def _existing_todos_text(todos: list[ExistingTodoBrief]) -> str:
         return "(空)"
     return "\n".join(
         f'id={todo.id} assignee={todo.assignee_open_id} status={todo.status} '
-        f'due_at={todo.due_at} title="{_quote(todo.title)}" action="{_quote(todo.action)}"'
+        f'due_at={todo.due_at} title="{_quote(todo.title)}" action_phrase="{_quote(todo.action_phrase)}"'
         for todo in todos
     )
 
@@ -496,7 +518,7 @@ def _event_payload(
         "source_open_id": source_open_id,
         "assignee_open_id": record.assignee_open_id,
         "title": record.title,
-        "action": record.action,
+        "action_phrase": record.action_phrase,
         "due_at": record.due_at,
         "remind_at": record.remind_at,
         "status": record.status,

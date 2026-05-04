@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS todos (
     source_open_id TEXT NOT NULL,
     assignee_open_id TEXT NOT NULL,
     title TEXT NOT NULL,
-    action TEXT NOT NULL,
+    action_phrase TEXT NOT NULL,
     due_at TEXT NOT NULL,
     remind_at TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',
@@ -42,7 +42,7 @@ class TodoRecord:
     source_open_id: str
     assignee_open_id: str
     title: str
-    action: str
+    action_phrase: str
     due_at: str
     remind_at: str
     status: TodoStatus
@@ -62,8 +62,15 @@ def _conn() -> sqlite3.Connection:
         stmt = stmt.strip()
         if stmt:
             conn.execute(stmt)
+    _migrate_todos_schema(conn)
     conn.commit()
     return conn
+
+
+def _migrate_todos_schema(conn: sqlite3.Connection) -> None:
+    columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(todos)").fetchall()}
+    if "action_phrase" not in columns and "action" in columns:
+        conn.execute("ALTER TABLE todos RENAME COLUMN action TO action_phrase")
 
 
 class TodoStore:
@@ -75,7 +82,7 @@ class TodoStore:
         source_open_id: str,
         assignee_open_id: str,
         title: str,
-        action: str,
+        action_phrase: str,
         due_at: str,
         remind_at: str,
         source_text: str,
@@ -97,7 +104,7 @@ class TodoStore:
                 return None
             cursor = conn.execute(
                 """INSERT OR IGNORE INTO todos
-                   (chat_id, message_id, source_open_id, assignee_open_id, title, action,
+                   (chat_id, message_id, source_open_id, assignee_open_id, title, action_phrase,
                     due_at, remind_at, status, source_text, created_at, updated_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
@@ -106,7 +113,7 @@ class TodoStore:
                     source_open_id,
                     assignee_open_id,
                     title,
-                    action,
+                    action_phrase,
                     due_at,
                     remind_at,
                     status,
@@ -237,13 +244,13 @@ class TodoStore:
         todo_id: int,
         *,
         title: str | None = None,
-        action: str | None = None,
+        action_phrase: str | None = None,
         due_at: str | None = None,
         remind_at: str | None = None,
     ) -> TodoRecord | None:
         values = {
             "title": title,
-            "action": action,
+            "action_phrase": action_phrase,
             "due_at": due_at,
             "remind_at": remind_at,
         }
@@ -280,7 +287,7 @@ def _row_to_todo(row: sqlite3.Row) -> TodoRecord:
         source_open_id=row["source_open_id"],
         assignee_open_id=row["assignee_open_id"],
         title=row["title"],
-        action=row["action"],
+        action_phrase=row["action_phrase"],
         due_at=row["due_at"],
         remind_at=row["remind_at"],
         status=row["status"],

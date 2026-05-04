@@ -199,6 +199,12 @@ class TodoExtractorTests(unittest.TestCase):
 
         self.assertIn("is_bot_request：True", prompt)
         self.assertIn("这类请求由 Agent 执行，不创建个人待办", prompt)
+        self.assertIn("action_phrase 是该待办对应的动作短语", prompt)
+        self.assertIn("绝对不要输出 create / update / new", prompt)
+        self.assertIn("触发消息内含 @ mention", prompt)
+        self.assertIn("回到窗口里找出真正的承诺者", prompt)
+        self.assertIn("仅当触发消息和某条 existing todo 是严格语义上同一件事", prompt)
+        self.assertIn("新的子任务", prompt)
 
 
 class MeetingCardTests(unittest.TestCase):
