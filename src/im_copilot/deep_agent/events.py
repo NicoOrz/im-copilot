@@ -18,6 +18,7 @@ EventType = Literal[
     "summary_created",
     "assistant_message",
     "todo_updated",
+    "board_item_updated",
     "error",
 ]
 
@@ -32,6 +33,7 @@ EVENT_TYPES: set[str] = {
     "summary_created",
     "assistant_message",
     "todo_updated",
+    "board_item_updated",
     "error",
 }
 
