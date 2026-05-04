@@ -1,0 +1,183 @@
+{% extends "base.html" %}
+
+{% block title %}IM Copilot - 设置{% endblock %}
+
+{% block content %}
+<aside class="sidebar">
+    <div class="sidebar-header">
+        <h1>IM Copilot</h1>
+        <a href="/" class="btn btn-primary" style="text-decoration:none;text-align:center">返回聊天</a>
+    </div>
+</aside>
+
+<main class="chat-container" style="padding:24px;overflow-y:auto">
+    <h2 style="margin-bottom:20px">节点 LLM 配置</h2>
+    <p style="color:#666;margin-bottom:20px;font-size:14px">为每个节点单独配置 API 端点、模型和密钥。留空表示使用全局默认值。</p>
+
+    <div id="config-form">
+        {% for node in nodes %}
+        <div class="config-node" data-node="{{ node }}">
+            <h3 class="config-node-title">{{ node }}</h3>
+            <div class="config-fields">
+                <div class="config-field">
+                    <label>Base URL</label>
+                    <input type="text" class="config-input" data-key="base_url" placeholder="使用全局默认">
+                </div>
+                <div class="config-field">
+                    <label>Model</label>
+                    <input type="text" class="config-input" data-key="model" placeholder="使用全局默认">
+                </div>
+                <div class="config-field">
+                    <label>API Key</label>
+                    <input type="password" class="config-input" data-key="api_key" placeholder="使用全局默认">
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+
+    <div style="margin-top:20px;display:flex;gap:12px">
+        <button class="btn btn-primary" onclick="saveConfig()" style="width:auto;padding:10px 32px">保存配置</button>
+        <span id="save-status" style="color:#2e7d32;font-size:14px;line-height:40px"></span>
+    </div>
+
+    <div id="defaults-info" style="margin-top:24px;padding:16px;background:#f8f9fa;border-radius:8px;font-size:13px;color:#666"></div>
+
+    <h2 style="margin:32px 0 20px">Runtime Skills 配置</h2>
+    <p style="color:#666;margin-bottom:20px;font-size:14px">配置文档、白板和 PPT 创建规则。留空字段会使用内置默认值。</p>
+
+    <div id="skills-form">
+        {% for skill in skills %}
+        <div class="config-node skill-config" data-skill="{{ skill }}">
+            <h3 class="config-node-title">{{ skill }}</h3>
+            <div class="skill-fields"></div>
+        </div>
+        {% endfor %}
+    </div>
+
+    <div style="margin-top:20px;display:flex;gap:12px">
+        <button class="btn btn-primary" onclick="saveSkillConfig()" style="width:auto;padding:10px 32px">保存 Skills 配置</button>
+        <span id="skill-save-status" style="color:#2e7d32;font-size:14px;line-height:40px"></span>
+    </div>
+</main>
+
+<script>
+async function loadConfig() {
+    const res = await fetch('/api/config/nodes');
+    const data = await res.json();
+    const nodes = data.nodes || {};
+    const defaults = data.defaults || {};
+
+    document.querySelectorAll('.config-node[data-node]').forEach(el => {
+        const node = el.dataset.node;
+        const cfg = nodes[node] || {};
+        el.querySelectorAll('.config-input').forEach(input => {
+            const key = input.dataset.key;
+            input.value = cfg[key] || '';
+            if (key !== 'api_key') {
+                input.placeholder = defaults[key] || '使用全局默认';
+            }
+        });
+    });
+
+    const info = document.getElementById('defaults-info');
+    info.innerHTML = `<strong>全局默认值</strong><br>Base URL: ${defaults.base_url || '-'}<br>Model: ${defaults.model || '-'}`;
+}
+
+function escapeHtml(value) {
+    return String(value)
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;');
+}
+
+async function loadSkillConfig() {
+    const res = await fetch('/api/config/skills');
+    const data = await res.json();
+    const skills = data.skills || {};
+    const fields = data.fields || {};
+
+    document.querySelectorAll('.skill-config').forEach(el => {
+        const skill = el.dataset.skill;
+        const cfg = skills[skill] || {};
+        const fieldList = fields[skill] || [];
+        const container = el.querySelector('.skill-fields');
+        container.innerHTML = fieldList.map(field => `
+            <div class="config-field skill-field">
+                <label>${field}</label>
+                <textarea class="config-input skill-input" data-key="${field}" rows="3">${escapeHtml(cfg[field] || '')}</textarea>
+            </div>
+        `).join('');
+    });
+}
+
+async function saveSkillConfig() {
+    const body = { skills: {} };
+    document.querySelectorAll('.skill-config').forEach(el => {
+        const skill = el.dataset.skill;
+        const entry = {};
+        el.querySelectorAll('.skill-input').forEach(input => {
+            const val = input.value.trim();
+            if (val) entry[input.dataset.key] = val;
+        });
+        if (Object.keys(entry).length > 0) body.skills[skill] = entry;
+    });
+
+    const res = await fetch('/api/config/skills', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    const status = document.getElementById('skill-save-status');
+    if (data.saved) {
+        status.textContent = '已保存';
+        setTimeout(() => { status.textContent = ''; }, 2000);
+    }
+}
+
+async function saveConfig() {
+    const body = {};
+    document.querySelectorAll('.config-node[data-node]').forEach(el => {
+        const node = el.dataset.node;
+        const entry = {};
+        el.querySelectorAll('.config-input').forEach(input => {
+            const val = input.value.trim();
+            if (val) entry[input.dataset.key] = val;
+        });
+        if (Object.keys(entry).length > 0) body[node] = entry;
+    });
+
+    const res = await fetch('/api/config/nodes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    const status = document.getElementById('save-status');
+    if (data.saved) {
+        status.textContent = '已保存';
+        setTimeout(() => { status.textContent = ''; }, 2000);
+    }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    loadConfig();
+    loadSkillConfig();
+});
+</script>
+
+<style>
+.config-node { margin-bottom: 16px; padding: 16px; background: #f8f9fa; border-radius: 8px; }
+.config-node-title { font-size: 15px; font-weight: 600; color: #1976d2; margin-bottom: 10px; }
+.config-fields { display: flex; gap: 12px; }
+.config-field { flex: 1; }
+.config-field label { display: block; font-size: 12px; color: #666; margin-bottom: 4px; }
+.config-input { width: 100%; padding: 8px 10px; border: 1px solid #e0e0e0; border-radius: 6px; font-size: 13px; }
+.config-input:focus { outline: none; border-color: #1976d2; }
+.skill-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.skill-field { min-width: 0; }
+.skill-input { resize: vertical; font-family: inherit; line-height: 1.5; }
+</style>
+{% endblock %}

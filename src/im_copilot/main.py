@@ -2,11 +2,9 @@ import argparse
 import logging
 import os
 import sys
+import uuid
 
-from langgraph.types import Command
-
-from im_copilot.checkpointer import get_checkpointer
-from im_copilot.graph.pipeline import build_pipeline
+from im_copilot.deep_agent.service import run_agent
 
 
 USAGE = 'Usage: python -m im_copilot.main "<message>"'
@@ -25,6 +23,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     _configure_logging(args.debug)
 
+    if args.debug:
+        os.environ["IM_COPILOT_DEBUG"] = "1"
+
     if args.web and args.lark_bot:
         return _run_web_server(args.host, args.port, with_lark_bot=True)
 
@@ -34,54 +35,31 @@ def main(argv: list[str] | None = None) -> int:
     if args.lark_bot:
         return _run_lark_bot(debug=args.debug)
 
+    if args.resume:
+        print("无待处理任务。")
+        return 0
+
     if not args.message:
         print(USAGE)
         return 1
 
     message = " ".join(args.message)
+    result = run_agent(
+        message,
+        thread_id=args.thread_id,
+        source="cli",
+        chat_id="cli",
+        message_id=str(uuid.uuid4()),
+    )
+    if result.status == "error":
+        print(result.error, file=sys.stderr)
+        return 1
 
-    # Use the same persistent checkpointer for both initial and resume runs
-    cp_type = os.getenv("CHECKPOINTER_TYPE", "sqlite")
-    with get_checkpointer(cp_type) as checkpointer:
-        graph = build_pipeline(checkpointer=checkpointer)
-        config = {"configurable": {"thread_id": args.thread_id}}
-
-        if args.resume:
-            import json
-            decision = json.loads(args.resume)
-            result = graph.invoke(Command(resume=decision), config=config)
-        else:
-            initial_state = {
-                "raw_message": message,
-                "chat_id": "cli",
-                "message_id": "cli",
-                "source": "cli",
-                "errors": [],
-                "checks": [],
-                "reflection_iteration": 0,
-            }
-            result = graph.invoke(initial_state, config=config)
-
-    # Handle interrupt output
-    if "__interrupt__" in result:
-        interrupt_data = result["__interrupt__"][0]
-        print("=" * 60)
-        print(f"[INTERRUPT] {interrupt_data.value['gate']}")
-        print("=" * 60)
-        print(interrupt_data.value.get("message", ""))
-        if "plan" in interrupt_data.value:
-            print("\n计划:")
-            for step in interrupt_data.value["plan"]:
-                print(f"  - {step}")
-        if "questions" in interrupt_data.value:
-            print("\n问题:")
-            for i, q in enumerate(interrupt_data.value["questions"], 1):
-                print(f"  {i}. {q}")
-        print("\n恢复命令:")
-        print(f'  python -m im_copilot.main --thread-id {args.thread_id} --resume \'{{"approved": true}}\' "{message}"')
-        return 0
-
-    print(result.get("summary", ""))
+    print(result.summary)
+    for artifact in result.artifacts.values():
+        url = artifact.get("url", "")
+        if url:
+            print(f"{artifact.get('title', artifact.get('kind', 'artifact'))}: {url}")
     return 0
 
 

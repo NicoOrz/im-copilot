@@ -1,0 +1,226 @@
+import sqlite3
+
+import pytest
+from im_copilot.memory.todo_store import TodoStore, TodoStatus
+
+@pytest.fixture
+def store(tmp_path, monkeypatch):
+    db = str(tmp_path / "test.sqlite")
+    monkeypatch.setenv("TODO_DB", db)
+    return TodoStore()
+
+def test_create_awaiting_confirmation(store):
+    record = store.create(
+        chat_id="chat1",
+        message_id="msg1",
+        source_open_id="user1",
+        assignee_open_id="user2",
+        title="测试待办",
+        action_phrase="完成报告",
+        due_at="2026-05-10T18:00",
+        remind_at="2026-05-10T17:00",
+        source_text="赵磊周五前给报告",
+        status="awaiting_confirmation",
+    )
+    assert record is not None
+    assert record.status == "awaiting_confirmation"
+
+def test_get_by_id(store):
+    record = store.create(
+        chat_id="chat1", message_id="msg2", source_open_id="u1",
+        assignee_open_id="u2", title="T", action_phrase="A",
+        due_at="2026-05-10T18:00", remind_at="2026-05-10T17:00",
+        source_text="src", status="awaiting_confirmation",
+    )
+    fetched = store.get_by_id(record.id)
+    assert fetched is not None
+    assert fetched.id == record.id
+
+def test_update_status_to_pending(store):
+    record = store.create(
+        chat_id="chat1", message_id="msg3", source_open_id="u1",
+        assignee_open_id="u2", title="T2", action_phrase="A2",
+        due_at="2026-05-10T18:00", remind_at="2026-05-10T17:00",
+        source_text="src", status="awaiting_confirmation",
+    )
+    ok = store.update_status(record.id, "pending")
+    assert ok is True
+    updated = store.get_by_id(record.id)
+    assert updated.status == "pending"
+
+def test_update_status_to_deleted(store):
+    record = store.create(
+        chat_id="chat1", message_id="msg4", source_open_id="u1",
+        assignee_open_id="u2", title="T3", action_phrase="A3",
+        due_at="2026-05-10T18:00", remind_at="2026-05-10T17:00",
+        source_text="src", status="awaiting_confirmation",
+    )
+    ok = store.update_status(record.id, "deleted")
+    assert ok is True
+    updated = store.get_by_id(record.id)
+    assert updated.status == "deleted"
+
+from unittest.mock import patch
+from im_copilot.memory.todo_extractor import extract_and_store_todos_from_window, WindowMessage
+
+def test_needs_confirmation_stored_as_awaiting(tmp_path, monkeypatch):
+    db = str(tmp_path / "test2.sqlite")
+    monkeypatch.setenv("TODO_DB", db)
+
+    from im_copilot.memory.todo_extractor import TodoDraft
+    from datetime import datetime, timezone
+
+    draft = TodoDraft(
+        assignee_open_id="ou_abc",
+        title="给数据口径",
+        action_phrase="提交数据口径文档",
+        due_at=datetime(2026, 5, 8, 18, 0, tzinfo=timezone.utc),
+        remind_at=datetime(2026, 5, 8, 17, 0, tzinfo=timezone.utc),
+        source_text="赵磊周五18:00前给数据口径",
+        confidence=0.5,
+        needs_confirmation=True,
+    )
+
+    with patch(
+        "im_copilot.memory.todo_extractor.extract_todos_from_window",
+        return_value=[draft],
+    ):
+        records = extract_and_store_todos_from_window(
+            chat_id="chat1",
+            message_id="msg_confirm",
+            source_open_id="ou_sender",
+            window=[
+                WindowMessage(
+                    message_id="msg_confirm",
+                    open_id="ou_sender",
+                    name="",
+                    text="赵磊周五18:00前给数据口径",
+                    ts=0,
+                    is_trigger=True,
+                )
+            ],
+            existing_open_todos=[],
+        )
+
+    awaiting = [r for r in records if r.status == "awaiting_confirmation"]
+    assert len(awaiting) == 1
+    assert awaiting[0].assignee_open_id == "ou_abc"
+
+from im_copilot.lark_card import create_todo_confirm_card
+
+def test_create_todo_confirm_card_structure():
+    card = create_todo_confirm_card(
+        todo_id=42,
+        title="给数据口径",
+        action_phrase="提交数据口径文档",
+        due_at="2026-05-08T18:00",
+        source_text="赵磊周五18:00前给数据口径",
+        source_open_id="ou_sender",
+    )
+    assert card["schema"] == "2.0"
+    body_elements = card["body"]["elements"]
+    md_elements = [e for e in body_elements if e.get("tag") == "markdown"]
+    assert len(md_elements) >= 1
+    md_text = md_elements[0]["content"]
+    assert "给数据口径" in md_text
+    assert "2026-05-08T18:00" in md_text
+    btn_elements = [e for e in body_elements if e.get("tag") == "button"]
+    assert len(btn_elements) == 2
+    actions = [b["behaviors"][0]["value"]["action"] for b in btn_elements]
+    assert "confirm_todo" in actions
+    assert "reject_todo" in actions
+    for btn in btn_elements:
+        assert btn["behaviors"][0]["value"]["todo_id"] == 42
+
+def test_confirm_todo_action_updates_status(tmp_path, monkeypatch):
+    db = str(tmp_path / "confirm_action.sqlite")
+    monkeypatch.setenv("TODO_DB", db)
+    store = TodoStore()
+
+    record = store.create(
+        chat_id="chat1", message_id="msg_ca", source_open_id="u1",
+        assignee_open_id="u2", title="T_ca", action_phrase="A_ca",
+        due_at="2026-05-10T18:00", remind_at="2026-05-10T17:00",
+        source_text="src", status="awaiting_confirmation",
+    )
+    assert record is not None
+
+    ok = store.update_status(record.id, "pending")
+    assert ok is True
+    updated = store.get_by_id(record.id)
+    assert updated.status == "pending"
+
+def test_reject_todo_action_deletes(tmp_path, monkeypatch):
+    db = str(tmp_path / "reject_action.sqlite")
+    monkeypatch.setenv("TODO_DB", db)
+    store = TodoStore()
+
+    record = store.create(
+        chat_id="chat1", message_id="msg_ra", source_open_id="u1",
+        assignee_open_id="u2", title="T_ra", action_phrase="A_ra",
+        due_at="2026-05-10T18:00", remind_at="2026-05-10T17:00",
+        source_text="src", status="awaiting_confirmation",
+    )
+    assert record is not None
+
+    ok = store.update_status(record.id, "deleted")
+    assert ok is True
+    updated = store.get_by_id(record.id)
+    assert updated.status == "deleted"
+
+def test_renames_old_action_column_to_action_phrase(tmp_path, monkeypatch):
+    db = str(tmp_path / "old_action.sqlite")
+    monkeypatch.setenv("TODO_DB", db)
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            """
+            CREATE TABLE todos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                source_open_id TEXT NOT NULL,
+                assignee_open_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                action TEXT NOT NULL,
+                due_at TEXT NOT NULL,
+                remind_at TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                source_text TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO todos
+                (chat_id, message_id, source_open_id, assignee_open_id, title, action,
+                 due_at, remind_at, status, source_text, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "chat1",
+                "msg_old",
+                "u1",
+                "u2",
+                "T_old",
+                "A_old",
+                "2026-05-10T18:00",
+                "2026-05-10T17:00",
+                "pending",
+                "src",
+                1.0,
+                1.0,
+            ),
+        )
+
+    records = TodoStore().list(chat_id="chat1", status="")
+    TodoStore().list(chat_id="chat1", status="")
+
+    with sqlite3.connect(db) as conn:
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(todos)")]
+
+    assert "action" not in columns
+    assert "action_phrase" in columns
+    assert len(records) == 1
+    assert records[0].action_phrase == "A_old"

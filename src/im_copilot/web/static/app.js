@@ -17,6 +17,8 @@ const modalFooter = document.getElementById('modal-footer');
 
 let currentThreadId = window.CURRENT_THREAD_ID || null;
 let isProcessing = false;
+let ws = null;
+let statusPollTimer = null;
 
 // Initialize
 function init() {
@@ -34,8 +36,12 @@ function init() {
     // Load history if we're on a specific thread page
     if (currentThreadId) {
         loadThreadHistory(currentThreadId);
-        // Also check for pending interrupts so user can resume after reload
         checkPendingInterrupt(currentThreadId);
+    }
+
+    // Connect WebSocket for real-time Feishu push
+    if (window.CURRENT_USER && window.CURRENT_USER.open_id) {
+        connectWebSocket(window.CURRENT_USER.open_id);
     }
 }
 
@@ -46,6 +52,13 @@ async function checkPendingInterrupt(threadId) {
         const data = await res.json();
         if (data.status === 'interrupted') {
             handleInterrupt(data);
+        } else if (data.status === 'processing') {
+            setProcessing(true);
+            startStatusPolling();
+        } else if (data.status === 'complete') {
+            handleComplete(data);
+        } else if (data.status === 'error') {
+            addMessage('assistant', data.message || '恢复执行时出错。');
         }
     } catch (err) {
         console.error('Failed to check interrupt status:', err);
@@ -66,12 +79,14 @@ async function loadSessions() {
 // Render session list
 function renderSessions(sessions) {
     if (!sessionList) return;
-    sessionList.innerHTML = sessions.map(s => `
+    sessionList.innerHTML = sessions.map(s => {
+        const sourceTag = s.source === 'feishu' ? '<span class="source-tag feishu">飞书</span>' : '';
+        return `
         <div class="session-item ${s.thread_id === currentThreadId ? 'active' : ''}" data-thread-id="${s.thread_id}">
-            <span class="session-name">会话 ${s.thread_id.slice(0, 8)}</span>
+            <span class="session-name">${sourceTag}会话 ${s.thread_id.slice(0, 8)}</span>
             <button class="session-delete" data-thread-id="${s.thread_id}">×</button>
-        </div>
-    `).join('');
+        </div>`;
+    }).join('');
 }
 
 // Handle session click (select or delete)
@@ -312,6 +327,7 @@ async function handleSubmit(e) {
     addMessage('user', message);
     messageInput.value = '';
     setProcessing(true);
+    let keepProcessing = false;
 
     try {
         const res = await fetch(`${API_BASE}/sessions/${currentThreadId}/chat`, {
@@ -325,18 +341,27 @@ async function handleSubmit(e) {
             handleInterrupt(data);
         } else if (data.status === 'complete') {
             handleComplete(data);
+        } else if (data.status === 'processing') {
+            keepProcessing = true;
+            startStatusPolling();
         }
     } catch (err) {
         console.error('Chat error:', err);
         addMessage('assistant', '抱歉，处理消息时出错了。请重试。');
     } finally {
-        setProcessing(false);
+        if (!keepProcessing) {
+            setProcessing(false);
+        }
     }
 }
 
 // Handle interrupt
 function handleInterrupt(data) {
     const gate = data.gate;
+
+    if (window.DEBUG_MODE && data.timing) {
+        renderTiming(data.timing);
+    }
 
     if (gate === 'plan_approval') {
         showPlanApprovalModal(data);
@@ -412,6 +437,7 @@ function closeModal() {
 async function approvePlan() {
     closeModal();
     setProcessing(true);
+    let keepProcessing = false;
     try {
         const res = await fetch(`${API_BASE}/sessions/${currentThreadId}/resume`, {
             method: 'POST',
@@ -423,12 +449,17 @@ async function approvePlan() {
             handleInterrupt(data);
         } else if (data.status === 'complete') {
             handleComplete(data);
+        } else if (data.status === 'processing') {
+            keepProcessing = true;
+            startStatusPolling();
         }
     } catch (err) {
         console.error('Resume error:', err);
         addMessage('assistant', '恢复执行时出错。');
     } finally {
-        setProcessing(false);
+        if (!keepProcessing) {
+            setProcessing(false);
+        }
     }
 }
 
@@ -436,6 +467,7 @@ async function approvePlan() {
 async function rejectPlan() {
     closeModal();
     setProcessing(true);
+    let keepProcessing = false;
     try {
         const res = await fetch(`${API_BASE}/sessions/${currentThreadId}/resume`, {
             method: 'POST',
@@ -447,12 +479,17 @@ async function rejectPlan() {
             handleInterrupt(data);
         } else if (data.status === 'complete') {
             handleComplete(data);
+        } else if (data.status === 'processing') {
+            keepProcessing = true;
+            startStatusPolling();
         }
     } catch (err) {
         console.error('Resume error:', err);
         addMessage('assistant', '恢复执行时出错。');
     } finally {
-        setProcessing(false);
+        if (!keepProcessing) {
+            setProcessing(false);
+        }
     }
 }
 
@@ -465,6 +502,7 @@ async function submitClarification(count) {
 
     closeModal();
     setProcessing(true);
+    let keepProcessing = false;
     try {
         const res = await fetch(`${API_BASE}/sessions/${currentThreadId}/resume`, {
             method: 'POST',
@@ -476,12 +514,17 @@ async function submitClarification(count) {
             handleInterrupt(data);
         } else if (data.status === 'complete') {
             handleComplete(data);
+        } else if (data.status === 'processing') {
+            keepProcessing = true;
+            startStatusPolling();
         }
     } catch (err) {
         console.error('Resume error:', err);
         addMessage('assistant', '恢复执行时出错。');
     } finally {
-        setProcessing(false);
+        if (!keepProcessing) {
+            setProcessing(false);
+        }
     }
 }
 
@@ -489,6 +532,7 @@ async function submitClarification(count) {
 async function submitGeneric(approved) {
     closeModal();
     setProcessing(true);
+    let keepProcessing = false;
     try {
         const res = await fetch(`${API_BASE}/sessions/${currentThreadId}/resume`, {
             method: 'POST',
@@ -500,17 +544,23 @@ async function submitGeneric(approved) {
             handleInterrupt(data);
         } else if (data.status === 'complete') {
             handleComplete(data);
+        } else if (data.status === 'processing') {
+            keepProcessing = true;
+            startStatusPolling();
         }
     } catch (err) {
         console.error('Resume error:', err);
         addMessage('assistant', '恢复执行时出错。');
     } finally {
-        setProcessing(false);
+        if (!keepProcessing) {
+            setProcessing(false);
+        }
     }
 }
 
 // Handle complete response
 function handleComplete(data) {
+    stopStatusPolling();
     const summary = data.summary || '处理完成';
     addMessage('assistant', summary);
 
@@ -519,6 +569,42 @@ function handleComplete(data) {
     if (Object.keys(artifacts).length > 0) {
         showArtifacts(artifacts);
     }
+
+    // Show timing panel in debug mode
+    if (window.DEBUG_MODE && data.timing) {
+        renderTiming(data.timing);
+    }
+}
+
+function startStatusPolling() {
+    if (statusPollTimer || !currentThreadId) return;
+    statusPollTimer = setInterval(checkProcessingStatus, 3000);
+}
+
+function stopStatusPolling() {
+    if (!statusPollTimer) return;
+    clearInterval(statusPollTimer);
+    statusPollTimer = null;
+}
+
+async function checkProcessingStatus() {
+    if (!currentThreadId) return;
+    try {
+        const res = await fetch(`${API_BASE}/sessions/${currentThreadId}/status`);
+        const data = await res.json();
+        if (data.status === 'processing' || data.status === 'idle') return;
+        stopStatusPolling();
+        setProcessing(false);
+        if (data.status === 'interrupted') {
+            handleInterrupt(data);
+        } else if (data.status === 'complete') {
+            handleComplete(data);
+        } else if (data.status === 'error') {
+            addMessage('assistant', data.message || '恢复执行时出错。');
+        }
+    } catch (err) {
+        console.error('Status polling error:', err);
+    }
 }
 
 // Show artifacts
@@ -526,6 +612,8 @@ function showArtifacts(artifacts) {
     const artifactHtml = Object.entries(artifacts).map(([key, artifact]) => `
         <div class="artifact-card">
             <h4>${escapeHtml(artifact.title || key)} (${escapeHtml(artifact.kind || '')})</h4>
+            ${artifact.status ? `<p>${escapeHtml(artifact.status)}</p>` : ''}
+            ${artifact.url ? `<p><a href="${escapeHtml(artifact.url)}" target="_blank" rel="noopener">打开产物</a></p>` : ''}
             <pre>${escapeHtml(artifact.preview || '')}</pre>
         </div>
     `).join('');
@@ -592,6 +680,106 @@ window.approvePlan = approvePlan;
 window.rejectPlan = rejectPlan;
 window.submitClarification = submitClarification;
 window.submitGeneric = submitGeneric;
+
+// WebSocket connection for real-time Feishu message push
+function connectWebSocket(openId) {
+    const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const url = `${protocol}//${location.host}/ws/${openId}`;
+    ws = new WebSocket(url);
+
+    ws.onmessage = function(event) {
+        try {
+            const data = JSON.parse(event.data);
+            handleWsMessage(data);
+        } catch (e) {
+            console.error('WS parse error:', e);
+        }
+    };
+
+    ws.onclose = function() {
+        setTimeout(() => connectWebSocket(openId), 3000);
+    };
+
+    ws.onerror = function() {
+        ws.close();
+    };
+}
+
+function handleWsMessage(data) {
+    const threadId = data.thread_id;
+    if (!threadId) return;
+
+    if (data.type === 'message' && data.data) {
+        if (threadId === currentThreadId) {
+            addMessage(data.data.role || 'user', data.data.content || '');
+        }
+        loadSessions();
+    } else if (data.type === 'complete' && data.data) {
+        if (threadId === currentThreadId) {
+            if (data.data.summary) {
+                addMessage('assistant', data.data.summary);
+            }
+            if (data.data.artifacts && Object.keys(data.data.artifacts).length > 0) {
+                showArtifacts(data.data.artifacts);
+            }
+        }
+        loadSessions();
+    } else if (data.type === 'node_update') {
+        if (threadId === currentThreadId && data.data) {
+            addThinkingBlock(data.data.node || 'unknown', {}, data.data.step || 0);
+        }
+    }
+}
+
+// Render timing waterfall chart (debug mode)
+function renderTiming(timing) {
+    const panel = document.getElementById('timing-panel');
+    const header = document.getElementById('timing-header');
+    const bars = document.getElementById('timing-bars');
+    if (!panel || !header || !bars) return;
+
+    const totalMs = timing.graph_duration_ms || 1;
+    header.textContent = `全链路耗时: ${totalMs.toFixed(0)}ms`;
+
+    const nodeLabels = {
+        intent: '意图识别',
+        planner: '任务规划',
+        clarification: '澄清问题',
+        plan_approval: '计划审批',
+        route_content: '路由分发',
+        doc: '生成文档',
+        whiteboard: '生成白板',
+        slide: '生成PPT',
+        verify: '质量验证',
+        side_agent: '并行验证',
+        route_after_verify: '结果路由',
+        deliver: '总结交付',
+    };
+
+    const statusColors = {
+        success: '#4caf50',
+        error: '#f44336',
+        interrupted: '#ff9800',
+        rate_limited: '#ff5722',
+    };
+
+    bars.innerHTML = (timing.nodes || []).map(n => {
+        const pct = Math.max((n.duration_ms / totalMs) * 100, 2);
+        const left = (n.start_ms / totalMs) * 100;
+        const color = statusColors[n.status] || '#90a4ae';
+        const label = nodeLabels[n.node] || n.node;
+        return `<div class="timing-row">
+            <span class="timing-node-name">${escapeHtml(label)}</span>
+            <div class="timing-track">
+                <div class="timing-bar" style="width:${pct}%;left:${left}%;background:${color}">
+                    ${n.duration_ms.toFixed(0)}ms
+                </div>
+            </div>
+        </div>`;
+    }).join('');
+
+    panel.style.display = 'block';
+}
 
 // Start
 document.addEventListener('DOMContentLoaded', init);

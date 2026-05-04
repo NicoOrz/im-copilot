@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field
 
-from im_copilot.llm import get_llm
+from im_copilot.llm import get_llm_for_node, invoke_structured_with_llm
 from im_copilot.state import CheckResult, PipelineState
 
 VERIFY_PROMPT = """你是一位严格的内容质量审核员。请审核以下内容是否满足用户需求。
@@ -24,13 +24,6 @@ class VerifyOutput(BaseModel):
         description="审核结果: pass | revise | clarify"
     )
     reason: str = Field(description="审核原因和修改建议")
-
-
-def _get_llm():
-    """Lazy-load the LLM client to avoid import-time construction."""
-    if not hasattr(_get_llm, "_instance"):
-        _get_llm._instance = get_llm().with_structured_output(VerifyOutput)
-    return _get_llm._instance
 
 
 def verify_node(state: PipelineState) -> dict:
@@ -68,7 +61,7 @@ def verify_node(state: PipelineState) -> dict:
         preview=preview,
     )
 
-    output: VerifyOutput = _get_llm().invoke(prompt)
+    output = invoke_structured_with_llm(get_llm_for_node("verify"), VerifyOutput, prompt)
 
     return {
         "checks": [CheckResult(task=task, status=output.status, reason=output.reason)],

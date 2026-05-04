@@ -96,6 +96,29 @@ def create_progress_card(title: str = "正在处理...") -> dict:
     return card
 
 
+def create_command_response_card(text: str, title: str = "命令结果") -> dict:
+    card = _base_card()
+    card["header"] = {
+        "title": {
+            "tag": "plain_text",
+            "content": title,
+        },
+        "template": "blue",
+        "padding": "12px 12px 12px 12px",
+    }
+    card["body"]["elements"] = [
+        {
+            "tag": "markdown",
+            "element_id": "command_result_md",
+            "content": text,
+            "text_align": "left",
+            "text_size": "normal_v2",
+            "margin": "0px 0px 0px 0px",
+        }
+    ]
+    return card
+
+
 def create_approval_card(
     plan: list[str],
     intent_type: str,
@@ -308,4 +331,157 @@ def create_result_card(
         "padding": "12px 12px 12px 12px",
     }
     card["body"]["elements"] = elements
+    return card
+
+
+def create_meeting_confirmation_card(
+    *,
+    board_item_id: int,
+    title: str,
+    start: str,
+    end: str,
+    source_text: str,
+    attendee_ids: list[str],
+) -> dict:
+    time_text = f"{start} ~ {end}" if start and end else "时间待确认"
+    attendees_text = "、".join(_at_tag(item) for item in attendee_ids) if attendee_ids else "仅创建者"
+    source_excerpt = source_text.strip() or "来自群聊会议候选"
+
+    card = _base_card()
+    card["header"] = {
+        "title": {
+            "tag": "plain_text",
+            "content": "是否创建飞书会议",
+        },
+        "template": "orange",
+        "padding": "12px 12px 12px 12px",
+    }
+    card["body"]["elements"] = [
+        {
+            "tag": "markdown",
+            "element_id": "meeting_confirm_md",
+            "content": (
+                f"**会议事项**\n{title}\n\n"
+                f"**时间**\n{time_text}\n\n"
+                f"**参与人**\n{attendees_text}\n\n"
+                f"**依据**\n{source_excerpt}"
+            ),
+            "text_align": "left",
+            "text_size": "normal_v2",
+            "margin": "0px 0px 0px 0px",
+        },
+        {
+            "tag": "button",
+            "element_id": "create_meeting_btn",
+            "text": {
+                "tag": "plain_text",
+                "content": "创建日程",
+            },
+            "type": "primary",
+            "behaviors": [
+                {
+                    "type": "callback",
+                    "value": {
+                        "action": "create_group_meeting_event",
+                        "board_item_id": board_item_id,
+                    },
+                }
+            ],
+            "margin": "8px 0px 0px 0px",
+        },
+        {
+            "tag": "button",
+            "element_id": "ignore_meeting_btn",
+            "text": {
+                "tag": "plain_text",
+                "content": "忽略",
+            },
+            "type": "default",
+            "behaviors": [
+                {
+                    "type": "callback",
+                    "value": {
+                        "action": "ignore_group_meeting_event",
+                        "board_item_id": board_item_id,
+                    },
+                }
+            ],
+            "margin": "8px 0px 0px 0px",
+        },
+    ]
+    return card
+
+
+def _at_tag(open_id: str) -> str:
+    return f"<at id={open_id}></at>"
+
+
+def create_todo_confirm_card(
+    todo_id: int,
+    title: str,
+    action_phrase: str,
+    due_at: str,
+    source_text: str,
+    source_open_id: str,
+    assignee_name: str = "",
+) -> dict:
+    """Return an interactive todo confirmation card.
+
+    Args:
+        todo_id: The unique identifier for the todo.
+        title: The todo title.
+        action_phrase: The todo action phrase.
+        due_at: The deadline in ISO format (e.g., "2026-05-08T18:00").
+        source_text: The original source message text.
+        source_open_id: The open_id of the user who created the todo.
+        assignee_name: Optional name of the person assigned to the todo.
+
+    Returns:
+        A Feishu CardKit V2 dict with markdown content and confirm/reject buttons.
+    """
+    assignee_line = f"**负责人：** {assignee_name}\n" if assignee_name else ""
+    source_excerpt = source_text[:100] + "…" if len(source_text) > 100 else source_text
+    content = (
+        f"**事项：** {title}\n"
+        f"**动作：** {action_phrase}\n"
+        f"**截止时间：** {due_at}\n"
+        f"{assignee_line}"
+        f"**来源消息：** {source_excerpt}"
+    )
+    card = _base_card()
+    card["header"] = {
+        "title": {"tag": "plain_text", "content": "待办确认"},
+        "template": "yellow",
+        "padding": "12px 12px 12px 12px",
+    }
+    card["body"]["elements"] = [
+        {
+            "tag": "markdown",
+            "element_id": "todo_confirm_md",
+            "content": content,
+            "text_align": "left",
+            "text_size": "normal_v2",
+            "margin": "0px 0px 0px 0px",
+        },
+        {
+            "tag": "button",
+            "element_id": "confirm_todo_btn",
+            "text": {"tag": "plain_text", "content": "确认"},
+            "type": "primary",
+            "behaviors": [
+                {"type": "callback", "value": {"action": "confirm_todo", "todo_id": todo_id}}
+            ],
+            "margin": "8px 0px 0px 0px",
+        },
+        {
+            "tag": "button",
+            "element_id": "reject_todo_btn",
+            "text": {"tag": "plain_text", "content": "忽略"},
+            "type": "default",
+            "behaviors": [
+                {"type": "callback", "value": {"action": "reject_todo", "todo_id": todo_id}}
+            ],
+            "margin": "4px 0px 0px 0px",
+        },
+    ]
     return card

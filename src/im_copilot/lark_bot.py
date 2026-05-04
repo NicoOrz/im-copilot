@@ -6,8 +6,11 @@ and updating interactive cards via the Feishu OpenAPI.
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
+import string
+import random
 from typing import Any, Callable
 
 import requests
@@ -18,17 +21,52 @@ from lark_oapi.api.auth.v3 import (
     InternalTenantAccessTokenRequestBodyBuilder,
 )
 from lark_oapi.api.im.v1 import (
+    CreateMessageReactionRequestBodyBuilder,
+    CreateMessageReactionRequestBuilder,
     CreateMessageRequestBodyBuilder,
     CreateMessageRequestBuilder,
+    EmojiBuilder,
+    GetMessageResourceRequestBuilder,
+    ListChatRequestBuilder,
+    ListMessageRequestBuilder,
     PatchMessageRequestBodyBuilder,
     PatchMessageRequestBuilder,
     ReplyMessageRequestBodyBuilder,
     ReplyMessageRequestBuilder,
 )
+from lark_oapi.api.speech_to_text.v1 import (
+    FileRecognizeSpeechRequestBuilder,
+    FileRecognizeSpeechRequestBodyBuilder,
+    Speech,
+    FileConfig,
+)
 from lark_oapi.core.exception import ObtainAccessTokenException
 from lark_oapi.core.token import TokenManager
 
 logger = logging.getLogger(__name__)
+
+
+def _message_to_dict(message: Any) -> dict[str, Any]:
+    sender = getattr(message, "sender", None)
+    body = getattr(message, "body", None)
+    mentions = []
+    for mention in getattr(message, "mentions", None) or []:
+        mentions.append({
+            "key": getattr(mention, "key", "") or "",
+            "open_id": getattr(mention, "id", "") or "",
+            "name": getattr(mention, "name", "") or "",
+        })
+    return {
+        "message_id": getattr(message, "message_id", "") or "",
+        "chat_id": getattr(message, "chat_id", "") or "",
+        "msg_type": getattr(message, "msg_type", "") or "",
+        "create_time": int(getattr(message, "create_time", 0) or 0),
+        "deleted": bool(getattr(message, "deleted", False)),
+        "sender_id": getattr(sender, "id", "") if sender else "",
+        "sender_type": getattr(sender, "sender_type", "") if sender else "",
+        "content": getattr(body, "content", "") if body else "",
+        "mentions": mentions,
+    }
 
 
 class LarkBot:
@@ -63,6 +101,8 @@ class LarkBot:
         self._verification_token = verification_token or ""
         self._domain = domain.rstrip("/")
         self._debug = debug
+        self.last_list_chat_messages_error: dict[str, Any] | None = None
+        self._bot_open_id = ""
 
         self._client = (
             lark.Client.builder()
@@ -105,9 +145,123 @@ class LarkBot:
                 result["data"] = data
         return result
 
+    def get_bot_open_id(self) -> str:
+        if self._bot_open_id:
+            return self._bot_open_id
+        try:
+            token = self._get_tenant_access_token()
+            resp = requests.get(
+                f"{self._domain}/open-apis/bot/v3/info",
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as exc:
+            logger.warning("get_bot_open_id failed: %s", exc)
+            return ""
+        if data.get("code") != 0:
+            logger.warning("get_bot_open_id failed: code=%s msg=%s", data.get("code"), data.get("msg"))
+            return ""
+        bot = data.get("bot") or data.get("data", {}).get("bot") or {}
+        open_id = str(bot.get("open_id") or "").strip()
+        if open_id:
+            self._bot_open_id = open_id
+        return self._bot_open_id
+
     # --------------------------------------------------------------------- #
     # Messaging
     # --------------------------------------------------------------------- #
+
+    def list_bot_chats(self) -> list[dict[str, Any]]:
+        """List group chats where the bot is present."""
+        logger.debug("list_bot_chats start")
+        chats: list[dict[str, Any]] = []
+        page_token = ""
+        while True:
+            builder = (
+                ListChatRequestBuilder()
+                .sort_type("ByCreateTimeAsc")
+                .page_size(100)
+            )
+            if page_token:
+                builder.page_token(page_token)
+            try:
+                resp = self._client.im.v1.chat.list(builder.build())
+            except ObtainAccessTokenException as exc:
+                logger.error("list_bot_chats auth error: %s", exc)
+                return chats
+            except Exception:
+                logger.exception("list_bot_chats unexpected error")
+                return chats
+            if not resp.success():
+                logger.error("list_bot_chats failed: code=%s msg=%s", resp.code, resp.msg)
+                return chats
+            data = resp.data
+            for item in getattr(data, "items", None) or []:
+                chats.append({
+                    "chat_id": getattr(item, "chat_id", "") or "",
+                    "name": getattr(item, "name", "") or "",
+                    "status": getattr(item, "chat_status", "") or "normal",
+                    "external": bool(getattr(item, "external", False)),
+                    "tenant_key": getattr(item, "tenant_key", "") or "",
+                })
+            if not getattr(data, "has_more", False):
+                break
+            page_token = getattr(data, "page_token", "") or ""
+            if not page_token:
+                break
+        logger.info("list_bot_chats success: count=%s", len(chats))
+        return chats
+
+    def list_chat_messages(
+        self,
+        chat_id: str,
+        *,
+        start_time: int,
+        end_time: int,
+    ) -> list[dict[str, Any]]:
+        """List chat history messages for a time range in seconds."""
+        logger.debug("list_chat_messages start: chat_id=%s start=%s end=%s", chat_id, start_time, end_time)
+        self.last_list_chat_messages_error = None
+        messages: list[dict[str, Any]] = []
+        page_token = ""
+        while True:
+            builder = (
+                ListMessageRequestBuilder()
+                .container_id_type("chat")
+                .container_id(chat_id)
+                .start_time(str(start_time))
+                .end_time(str(end_time))
+                .sort_type("ByCreateTimeAsc")
+                .page_size(50)
+            )
+            if page_token:
+                builder.page_token(page_token)
+            try:
+                resp = self._client.im.v1.message.list(builder.build())
+            except ObtainAccessTokenException as exc:
+                logger.error("list_chat_messages auth error: chat_id=%s error=%s", chat_id, exc)
+                self.last_list_chat_messages_error = {"code": exc.code, "msg": str(exc), "chat_id": chat_id}
+                return messages
+            except Exception as exc:
+                logger.exception("list_chat_messages unexpected error: chat_id=%s", chat_id)
+                self.last_list_chat_messages_error = {"code": -1, "msg": str(exc), "chat_id": chat_id}
+                return messages
+            if not resp.success():
+                logger.error("list_chat_messages failed: code=%s msg=%s chat_id=%s", resp.code, resp.msg, chat_id)
+                self.last_list_chat_messages_error = {"code": resp.code, "msg": resp.msg, "chat_id": chat_id}
+                return messages
+            data = resp.data
+            for item in getattr(data, "items", None) or []:
+                messages.append(_message_to_dict(item))
+            if not getattr(data, "has_more", False):
+                break
+            page_token = getattr(data, "page_token", "") or ""
+            if not page_token:
+                break
+        logger.info("list_chat_messages success: chat_id=%s count=%s", chat_id, len(messages))
+        return messages
 
     def send_text(self, chat_id: str, text: str) -> dict[str, Any]:
         """Send a plain text message to a chat.
@@ -160,6 +314,44 @@ class LarkBot:
             logger.exception("send_text unexpected error: chat_id=%s", chat_id)
             return {"code": -1, "msg": str(exc), "data": None}
 
+    def send_text_to_open_id(self, open_id: str, text: str) -> dict[str, Any]:
+        """Send a plain text message to a user by open_id."""
+        logger.debug("send_text_to_open_id start: open_id=%s text_len=%s", open_id, len(text))
+        content = json.dumps({"text": text}, ensure_ascii=False)
+        body = (
+            CreateMessageRequestBodyBuilder()
+            .receive_id(open_id)
+            .msg_type("text")
+            .content(content)
+            .build()
+        )
+        req = (
+            CreateMessageRequestBuilder()
+            .receive_id_type("open_id")
+            .request_body(body)
+            .build()
+        )
+
+        try:
+            resp = self._client.im.v1.message.create(req)
+            result = self._unwrap_response(resp)
+            if not resp.success():
+                logger.error(
+                    "send_text_to_open_id failed: code=%s msg=%s open_id=%s",
+                    resp.code,
+                    resp.msg,
+                    open_id,
+                )
+            else:
+                logger.info("send_text_to_open_id success: open_id=%s", open_id)
+            return result
+        except ObtainAccessTokenException as exc:
+            logger.error("send_text_to_open_id auth error: %s", exc)
+            return {"code": exc.code, "msg": str(exc), "data": None}
+        except Exception as exc:
+            logger.exception("send_text_to_open_id unexpected error: open_id=%s", open_id)
+            return {"code": -1, "msg": str(exc), "data": None}
+
     def reply_text(self, message_id: str, text: str) -> dict[str, Any]:
         """Reply to a specific message with plain text.
 
@@ -208,6 +400,42 @@ class LarkBot:
             return {"code": exc.code, "msg": str(exc), "data": None}
         except Exception as exc:
             logger.exception("reply_text unexpected error: message_id=%s", message_id)
+            return {"code": -1, "msg": str(exc), "data": None}
+
+    def add_reaction(self, message_id: str, emoji_type: str = "OK") -> dict[str, Any]:
+        """Add an emoji reaction to a message."""
+        logger.debug("add_reaction start: message_id=%s emoji_type=%s", message_id, emoji_type)
+        body = (
+            CreateMessageReactionRequestBodyBuilder()
+            .reaction_type(EmojiBuilder().emoji_type(emoji_type).build())
+            .build()
+        )
+        req = (
+            CreateMessageReactionRequestBuilder()
+            .message_id(message_id)
+            .request_body(body)
+            .build()
+        )
+
+        try:
+            resp = self._client.im.v1.message_reaction.create(req)
+            result = self._unwrap_response(resp)
+            if not resp.success():
+                logger.error(
+                    "add_reaction failed: code=%s msg=%s message_id=%s emoji_type=%s",
+                    resp.code,
+                    resp.msg,
+                    message_id,
+                    emoji_type,
+                )
+            else:
+                logger.info("add_reaction success: message_id=%s emoji_type=%s", message_id, emoji_type)
+            return result
+        except ObtainAccessTokenException as exc:
+            logger.error("add_reaction auth error: %s", exc)
+            return {"code": exc.code, "msg": str(exc), "data": None}
+        except Exception as exc:
+            logger.exception("add_reaction unexpected error: message_id=%s", message_id)
             return {"code": -1, "msg": str(exc), "data": None}
 
     def send_card(self, chat_id: str, card_json: dict[str, Any]) -> dict[str, Any]:
@@ -259,6 +487,94 @@ class LarkBot:
             return {"code": exc.code, "msg": str(exc), "data": None}
         except Exception as exc:
             logger.exception("send_card unexpected error: chat_id=%s", chat_id)
+            return {"code": -1, "msg": str(exc), "data": None}
+
+    def send_card_to_open_id(self, open_id: str, card_json: dict[str, Any]) -> dict[str, Any]:
+        """Send an interactive card to a user by open_id."""
+        logger.debug("send_card_to_open_id start: open_id=%s card_keys=%s", open_id, list(card_json.keys()))
+        content = json.dumps(card_json, ensure_ascii=False)
+        body = (
+            CreateMessageRequestBodyBuilder()
+            .receive_id(open_id)
+            .msg_type("interactive")
+            .content(content)
+            .build()
+        )
+        req = (
+            CreateMessageRequestBuilder()
+            .receive_id_type("open_id")
+            .request_body(body)
+            .build()
+        )
+
+        try:
+            resp = self._client.im.v1.message.create(req)
+            result = self._unwrap_response(resp)
+            if not resp.success():
+                logger.error(
+                    "send_card_to_open_id failed: code=%s msg=%s open_id=%s",
+                    resp.code,
+                    resp.msg,
+                    open_id,
+                )
+            else:
+                logger.info("send_card_to_open_id success: open_id=%s", open_id)
+            return result
+        except ObtainAccessTokenException as exc:
+            logger.error("send_card_to_open_id auth error: %s", exc)
+            return {"code": exc.code, "msg": str(exc), "data": None}
+        except Exception as exc:
+            logger.exception("send_card_to_open_id unexpected error: open_id=%s", open_id)
+            return {"code": -1, "msg": str(exc), "data": None}
+
+    def send_ephemeral_card(
+        self,
+        chat_id: str,
+        open_id: str,
+        card_json: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Send an interactive card visible only to one user in a group chat."""
+        logger.debug(
+            "send_ephemeral_card start: chat_id=%s open_id=%s card_keys=%s",
+            chat_id,
+            open_id,
+            list(card_json.keys()),
+        )
+        try:
+            token = self._get_tenant_access_token()
+            url = f"{self._domain}/open-apis/ephemeral/v1/send"
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json; charset=utf-8",
+            }
+            payload = {
+                "chat_id": chat_id,
+                "open_id": open_id,
+                "msg_type": "interactive",
+                "card": card_json,
+            }
+            response = requests.post(url, headers=headers, json=payload, timeout=30)
+            response.raise_for_status()
+            result = response.json()
+            if result.get("code") != 0:
+                logger.error(
+                    "send_ephemeral_card failed: code=%s msg=%s chat_id=%s open_id=%s",
+                    result.get("code"),
+                    result.get("msg"),
+                    chat_id,
+                    open_id,
+                )
+            else:
+                logger.info("send_ephemeral_card success: chat_id=%s open_id=%s", chat_id, open_id)
+            return result
+        except requests.HTTPError as exc:
+            logger.error("send_ephemeral_card HTTP error: %s chat_id=%s open_id=%s", exc, chat_id, open_id)
+            return {"code": exc.response.status_code, "msg": str(exc), "data": None}
+        except ObtainAccessTokenException as exc:
+            logger.error("send_ephemeral_card auth error: %s", exc)
+            return {"code": exc.code, "msg": str(exc), "data": None}
+        except Exception as exc:
+            logger.exception("send_ephemeral_card unexpected error: chat_id=%s open_id=%s", chat_id, open_id)
             return {"code": -1, "msg": str(exc), "data": None}
 
     def reply_card(self, message_id: str, card_json: dict[str, Any]) -> dict[str, Any]:
@@ -520,6 +836,83 @@ class LarkBot:
         except Exception as exc:
             logger.exception("patch_message unexpected error: message_id=%s", message_id)
             return {"code": -1, "msg": str(exc), "data": None}
+
+    # --------------------------------------------------------------------- #
+    # Audio / Speech-to-Text
+    # --------------------------------------------------------------------- #
+
+    def download_message_resource(self, message_id: str, file_key: str) -> bytes | None:
+        """Download an audio or file resource from a message.
+
+        Returns raw bytes on success, or None on failure.
+        """
+        logger.debug("download_message_resource start: message_id=%s file_key=%s", message_id, file_key)
+        req = (
+            GetMessageResourceRequestBuilder()
+            .message_id(message_id)
+            .file_key(file_key)
+            .type("file")
+            .build()
+        )
+        try:
+            resp = self._client.im.v1.message_resource.get(req)
+        except ObtainAccessTokenException as exc:
+            logger.error("download_message_resource auth error: %s", exc)
+            return None
+        except Exception as exc:
+            logger.exception("download_message_resource unexpected error: message_id=%s", message_id)
+            return None
+        if not resp.success():
+            logger.error(
+                "download_message_resource failed: code=%s msg=%s message_id=%s",
+                resp.code,
+                resp.msg,
+                message_id,
+            )
+            return None
+        file_content = getattr(resp, "file", None)
+        if file_content is None:
+            logger.error("download_message_resource: no file in response message_id=%s", message_id)
+            return None
+        raw = file_content.read() if hasattr(file_content, "read") else bytes(file_content)
+        logger.info("download_message_resource success: message_id=%s size=%s", message_id, len(raw))
+        return raw
+
+    def recognize_speech(self, audio_bytes: bytes) -> str | None:
+        """Recognize speech from raw PCM audio bytes via Feishu ASR API.
+
+        Returns the recognized text, or None on failure.
+        """
+        file_id = "".join(random.choices(string.ascii_lowercase + string.digits, k=16))
+        speech_b64 = base64.b64encode(audio_bytes).decode("ascii")
+        logger.debug("recognize_speech start: file_id=%s audio_size=%s", file_id, len(audio_bytes))
+
+        speech = Speech.builder().speech(speech_b64).build()
+        config = FileConfig.builder().file_id(file_id).format("pcm").engine_type("16k_auto").build()
+        body = (
+            FileRecognizeSpeechRequestBodyBuilder()
+            .speech(speech)
+            .config(config)
+            .build()
+        )
+        req = FileRecognizeSpeechRequestBuilder().request_body(body).build()
+        try:
+            resp = self._client.speech_to_text.v1.speech.file_recognize(req)
+        except ObtainAccessTokenException as exc:
+            logger.error("recognize_speech auth error: %s", exc)
+            return None
+        except Exception as exc:
+            logger.exception("recognize_speech unexpected error: file_id=%s", file_id)
+            return None
+        if not resp.success():
+            logger.error("recognize_speech failed: code=%s msg=%s", resp.code, resp.msg)
+            return None
+        text = getattr(getattr(resp, "data", None), "recognition_text", None)
+        if not text:
+            logger.warning("recognize_speech: empty recognition_text file_id=%s", file_id)
+            return None
+        logger.info("recognize_speech success: file_id=%s text_len=%s", file_id, len(text))
+        return text
 
     # --------------------------------------------------------------------- #
     # WebSocket

@@ -4,3 +4,5 @@ __pycache__/
 .worktrees/
 node_modules/
 *.sqlite
+node_llm_config.json
+skill_config.json
