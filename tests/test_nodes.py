@@ -9,8 +9,11 @@ from im_copilot.graph.nodes.slide_node import slide_node
 from im_copilot.graph.nodes.side_agent_node import side_agent_node
 from im_copilot.graph.nodes.verify_node import verify_node
 from im_copilot.graph.nodes.whiteboard_node import whiteboard_node
-from im_copilot.lark_handlers import _unverified_artifact_link_lines
+from im_copilot.lark_handlers import _calendar_summary
 from im_copilot.lark_handlers import _meeting_card_source_summary
+from im_copilot.lark_handlers import _send_meeting_confirmation_cards
+from im_copilot.lark_handlers import _unverified_artifact_link_lines
+from im_copilot.memory.group_board_store import GroupBoardItem
 from im_copilot.memory.todo_extractor import TodoExtractionOutput, WindowMessage, extract_todos_from_window
 from im_copilot.skills.config import get_skill_config
 from im_copilot.skills.registry import get_skill, planner_capability_text
@@ -222,6 +225,97 @@ class MeetingCardTests(unittest.TestCase):
         )
 
         self.assertEqual(result, "群聊明确提出今晚 19:00 在会议室对齐。")
+
+    @patch("im_copilot.lark_handlers._meeting_card_source_summary", return_value="群聊明确提出会议候选。")
+    def test_meeting_confirmation_card_is_sent_to_organizer(self, mock_summary):
+        item = GroupBoardItem(
+            id=42,
+            chat_id="oc_group",
+            message_id="om_1",
+            item_type="meeting",
+            title="评审会",
+            owner_open_id="ou_liran",
+            owner_name="李然",
+            due_at="2026-05-04T19:00+08:00",
+            status="pending_confirmation",
+            source_open_id="ou_organizer",
+            source_text="今晚 19:00 开评审会",
+            metadata_json=(
+                '{"recipients":["ou_liran"],"start":"2026-05-04T19:00+08:00",'
+                '"end":"2026-05-04T19:30+08:00","topic":"评审会"}'
+            ),
+            created_at=0,
+            updated_at=0,
+        )
+        bot = MagicMock()
+        bot.send_ephemeral_card.return_value = {"code": 0}
+
+        _send_meeting_confirmation_cards(bot, [item])
+
+        bot.send_ephemeral_card.assert_called_once()
+        self.assertEqual(bot.send_ephemeral_card.call_args.args[0], "oc_group")
+        self.assertEqual(bot.send_ephemeral_card.call_args.args[1], "ou_organizer")
+        mock_summary.assert_called_once()
+
+    def test_calendar_summary_prefers_metadata_topic(self):
+        item = GroupBoardItem(
+            id=1,
+            chat_id="oc_group",
+            message_id="om_1",
+            item_type="meeting",
+            title="今晚 19 点评审会",
+            owner_open_id="ou_liran",
+            owner_name="李然",
+            due_at="",
+            status="pending_confirmation",
+            source_open_id="ou_organizer",
+            source_text="今晚 19 点开评审会",
+            metadata_json='{"topic":"评审会"}',
+            created_at=0,
+            updated_at=0,
+        )
+
+        self.assertEqual(_calendar_summary(item), "评审会")
+
+    def test_calendar_summary_uses_title_when_topic_missing(self):
+        item = GroupBoardItem(
+            id=1,
+            chat_id="oc_group",
+            message_id="om_1",
+            item_type="meeting",
+            title="今晚 19 点评审会",
+            owner_open_id="ou_liran",
+            owner_name="李然",
+            due_at="",
+            status="pending_confirmation",
+            source_open_id="ou_organizer",
+            source_text="今晚 19 点开评审会",
+            metadata_json="{}",
+            created_at=0,
+            updated_at=0,
+        )
+
+        self.assertEqual(_calendar_summary(item), "今晚 19 点评审会")
+
+    def test_calendar_summary_uses_default_for_empty_item(self):
+        item = GroupBoardItem(
+            id=1,
+            chat_id="oc_group",
+            message_id="om_1",
+            item_type="meeting",
+            title="",
+            owner_open_id="ou_liran",
+            owner_name="李然",
+            due_at="",
+            status="pending_confirmation",
+            source_open_id="ou_organizer",
+            source_text="今晚 19 点开评审会",
+            metadata_json="not json",
+            created_at=0,
+            updated_at=0,
+        )
+
+        self.assertEqual(_calendar_summary(item), "群聊会议")
 
 
 class MockNodeTests(unittest.TestCase):

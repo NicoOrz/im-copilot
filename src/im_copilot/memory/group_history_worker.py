@@ -187,10 +187,10 @@ def _process_history_message(lark_bot: LarkBot, message: dict[str, Any]) -> bool
         source="feishu_history",
         mentions=mentions,
     )
-    if board_result.confirmation_recipients:
+    if board_result.meetings_to_confirm:
         from im_copilot.lark_handlers import _send_meeting_confirmation_cards
 
-        _send_meeting_confirmation_cards(lark_bot, board_result.items, board_result.confirmation_recipients)
+        _send_meeting_confirmation_cards(lark_bot, board_result.meetings_to_confirm)
     logger.info("group_history message processed: chat_id=%s message_id=%s", chat_id, message_id)
     return True
 

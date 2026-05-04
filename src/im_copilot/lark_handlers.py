@@ -593,46 +593,43 @@ def _send_private_group_command_response(
     return False
 
 
-def _send_meeting_confirmation_cards(lark_bot: LarkBot, items: list[Any], recipients: list[str]) -> None:
-    if not items:
+def _send_meeting_confirmation_cards(lark_bot: LarkBot, meetings: list[Any]) -> None:
+    if not meetings:
         return
-    meeting_items = [item for item in items if getattr(item, "item_type", "") == "meeting"]
-    if not meeting_items:
-        return
-    item = meeting_items[-1]
-    metadata = _json_dict(getattr(item, "metadata_json", ""))
-    recipients = _json_list(metadata.get("recipients")) or _json_list(recipients)
-    if not recipients:
-        return
-    start = str(metadata.get("start") or getattr(item, "due_at", "") or "")
-    end = str(metadata.get("end") or "")
-    source_summary = _meeting_card_source_summary(
-        title=str(item.title or "会议"),
-        start=start,
-        end=end,
-        source_text=str(item.source_text or ""),
-    )
-    if not source_summary:
-        record_event(
-            str(item.chat_id),
-            "feishu",
-            "error",
-            {
-                "error": "meeting card source summary failed",
-                "board_item_id": int(item.id),
-            },
+    for item in meetings:
+        if getattr(item, "item_type", "") != "meeting":
+            continue
+        organizer = str(getattr(item, "source_open_id", "") or "")
+        metadata = _json_dict(getattr(item, "metadata_json", ""))
+        recipients = _json_list(metadata.get("recipients"))
+        start = str(metadata.get("start") or getattr(item, "due_at", "") or "")
+        end = str(metadata.get("end") or "")
+        source_summary = _meeting_card_source_summary(
+            title=str(item.title or "会议"),
+            start=start,
+            end=end,
+            source_text=str(item.source_text or ""),
         )
-        return
-    card = create_meeting_confirmation_card(
-        board_item_id=int(item.id),
-        title=str(item.title or "会议"),
-        start=start,
-        end=end,
-        source_text=source_summary,
-        attendee_ids=recipients,
-    )
-    for open_id in recipients:
-        resp = lark_bot.send_ephemeral_card(str(item.chat_id), open_id, card)
+        if not source_summary:
+            record_event(
+                str(item.chat_id),
+                "feishu",
+                "error",
+                {
+                    "error": "meeting card source summary failed",
+                    "board_item_id": int(item.id),
+                },
+            )
+            continue
+        card = create_meeting_confirmation_card(
+            board_item_id=int(item.id),
+            title=str(item.title or "会议"),
+            start=start,
+            end=end,
+            source_text=source_summary,
+            attendee_ids=recipients,
+        )
+        resp = lark_bot.send_ephemeral_card(str(item.chat_id), organizer, card)
         if resp.get("code") != 0:
             record_event(
                 str(item.chat_id),
@@ -641,7 +638,7 @@ def _send_meeting_confirmation_cards(lark_bot: LarkBot, items: list[Any], recipi
                 {
                     "error": "meeting ephemeral card send failed",
                     "board_item_id": int(item.id),
-                    "open_id": open_id,
+                    "open_id": organizer,
                     "response": resp,
                 },
             )
@@ -877,8 +874,8 @@ def _process_message(
                 source_open_id=open_id,
                 mentions=mentions,
             )
-            if board_result.confirmation_recipients:
-                _send_meeting_confirmation_cards(lark_bot, board_result.items, board_result.confirmation_recipients)
+            if board_result.meetings_to_confirm:
+                _send_meeting_confirmation_cards(lark_bot, board_result.meetings_to_confirm)
         return
 
     parsed = parse_command(clean_text)
@@ -1249,7 +1246,7 @@ def _handle_group_meeting_card_action(
         if attendee_id != operator_open_id
     ]
     result = create_calendar_event(
-        summary=_calendar_summary(item.title),
+        summary=_calendar_summary(item),
         start=start,
         end=end,
         attendee_ids=attendee_ids,
@@ -1294,10 +1291,13 @@ def _json_list(value: Any) -> list[str]:
     return result
 
 
-def _calendar_summary(title: str) -> str:
-    cleaned = re.sub(r"(今天|今日|明天|明日|后天|\d{1,2}月\d{1,2}日)(早上|上午|中午|下午|晚上|晚间)?(\d{1,2}点)?", "", title)
-    cleaned = cleaned.strip(" ，,。")
-    return cleaned[:60] or "会议"
+def _calendar_summary(item: GroupBoardItem) -> str:
+    """日程标题：优先用 LLM 在 metadata.topic 里写好的主题，缺则用 board item title。"""
+    metadata = _json_dict(item.metadata_json)
+    topic = str(metadata.get("topic") or "").strip()
+    if topic:
+        return topic[:120]
+    return str(item.title or "群聊会议").strip()[:120]
 
 
 def _handle_todo_confirm_action(

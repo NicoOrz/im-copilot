@@ -43,7 +43,7 @@ class BoardExtractionOutput(BaseModel):
 @dataclass
 class BoardExtractionResult:
     items: list[GroupBoardItem]
-    confirmation_recipients: list[str]
+    meetings_to_confirm: list[GroupBoardItem]
 
 
 def extract_and_store_group_board_items(
@@ -62,7 +62,7 @@ def extract_and_store_group_board_items(
 
     mentions = mentions or []
     created: list[GroupBoardItem] = []
-    confirmation_recipients: list[str] = []
+    meetings_to_confirm: list[GroupBoardItem] = []
     current_time = now or datetime.now(_TZ)
     window = _recent_context(chat_id, message_id, current_time)
     allowed_open_ids = _window_open_ids(window, mentions)
@@ -131,8 +131,6 @@ def extract_and_store_group_board_items(
         metadata.setdefault("public_scope", "team")
         recipients = [item for item in _dedupe(candidate.recipients) if item in allowed_open_ids]
         if item_type == "meeting":
-            if not recipients and source_open_id in allowed_open_ids:
-                recipients = [source_open_id]
             recipient_names = [
                 mention_names[open_id]
                 for open_id in recipients
@@ -184,9 +182,9 @@ def extract_and_store_group_board_items(
         record_event(chat_id, source, event_type, _event_payload(item, event_kind, candidate))
 
         if item_type == "meeting" and merge_target is None:
-            confirmation_recipients.extend(recipients)
+            meetings_to_confirm.append(item)
 
-    return BoardExtractionResult(created, _dedupe(confirmation_recipients))
+    return BoardExtractionResult(created, meetings_to_confirm)
 
 
 def _extract_with_llm(

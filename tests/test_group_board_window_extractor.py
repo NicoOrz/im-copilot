@@ -106,7 +106,8 @@ def test_creates_assignment_meeting_and_decision(db_env, monkeypatch):
     assert [item.item_type for item in result.items] == ["assignment", "meeting", "decision"]
     meeting = result.items[1]
     assert meeting.status == "pending_confirmation"
-    assert result.confirmation_recipients == ["ou_sender", "ou_liran"]
+    assert result.meetings_to_confirm == [meeting]
+    assert meeting.source_open_id == "ou_sender"
 
 
 def test_links_to_existing_id_updates_meeting_assignment_and_decision(db_env, monkeypatch):
@@ -188,6 +189,7 @@ def test_links_to_existing_id_updates_meeting_assignment_and_decision(db_env, mo
     )
 
     assert [item.id for item in result.items] == [meeting.id, assignment.id, decision.id]
+    assert result.meetings_to_confirm == []
     updated_meeting = store.get(meeting.id)
     updated_assignment = store.get(assignment.id)
     updated_decision = store.get(decision.id)
@@ -197,6 +199,41 @@ def test_links_to_existing_id_updates_meeting_assignment_and_decision(db_env, mo
     assert updated_assignment.due_at == "2026-05-06T18:00+08:00"
     assert updated_decision is not None
     assert updated_decision.title == "采用灰度发布方案"
+
+
+def test_meeting_without_recipients_still_needs_organizer_confirmation(db_env, monkeypatch):
+    chat_id = "oc_board_meeting_no_recipients"
+    _record(chat_id, "m1", "19:00 拉会对齐评审结论", "ou_sender")
+    monkeypatch.setattr(
+        "im_copilot.memory.group_board_extractor.invoke_structured",
+        lambda *args, **kwargs: _output(
+            _candidate(
+                item_type="meeting",
+                title="评审结论对齐会",
+                owner_open_id="ou_sender",
+                owner_name="",
+                start_at="2026-05-04T19:00+08:00",
+                due_at="",
+                recipients=[],
+                metadata={"public_scope": "team", "location": "3F-01", "topic": "评审结论对齐会"},
+            ),
+        ),
+    )
+
+    result = extract_and_store_group_board_items(
+        "19:00 拉会对齐评审结论",
+        chat_id=chat_id,
+        message_id="m1",
+        source_open_id="ou_sender",
+        now=_NOW,
+    )
+
+    assert len(result.items) == 1
+    meeting = result.items[0]
+    metadata = json.loads(meeting.metadata_json)
+    assert metadata["recipients"] == []
+    assert result.meetings_to_confirm == [meeting]
+    assert meeting.source_open_id == "ou_sender"
 
 
 def test_unknown_owner_open_id_is_dropped(db_env, monkeypatch):
