@@ -65,6 +65,46 @@ def create(state: Mapping[str, Any]) -> SkillArtifact:
     )
 
 
+def fetch_slide_content(token: str, uat: str) -> str:
+    if not token or not uat:
+        return ""
+    try:
+        resp = run_lark_cli([
+            "slides", "xml_presentations", "get",
+            "--params", json.dumps({"xml_presentation_id": token}),
+            "--as", "user",
+        ], uat=uat)
+        raw = json.dumps(resp, ensure_ascii=False)
+        logger.info("fetch_slide_content token=%r resp_len=%s", token, len(raw))
+        return raw
+    except Exception:
+        logger.exception("fetch_slide_content failed token=%r", token)
+        return ""
+
+
+def fetch_slide_ids(token: str, uat: str) -> list[str]:
+    if not token or not uat:
+        return []
+    try:
+        resp = run_lark_cli([
+            "slides", "xml_presentations", "get",
+            "--params", json.dumps({"xml_presentation_id": token}),
+            "--as", "user",
+        ], uat=uat)
+        slides = (
+            resp.get("data", {}).get("slides")
+            or resp.get("slides")
+            or []
+        )
+        ids = [str(s.get("slide_id") or s.get("id") or "") for s in slides if isinstance(s, dict)]
+        ids = [i for i in ids if i]
+        logger.info("fetch_slide_ids token=%r count=%s", token, len(ids))
+        return ids
+    except Exception:
+        logger.exception("fetch_slide_ids failed token=%r", token)
+        return []
+
+
 def create_slide_from_xml(
     *,
     title: str,
