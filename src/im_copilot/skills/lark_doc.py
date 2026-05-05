@@ -204,6 +204,44 @@ def fetch_doc_content(
         return ""
 
 
+def update_doc_from_content(token: str, content: str, uat: str) -> SkillArtifact:
+    url = f"https://www.feishu.cn/docx/{token}"
+    result: SkillArtifact = {
+        "kind": "doc",
+        "title": "",
+        "status": "error",
+        "preview": content,
+        "token": token,
+        "url": url,
+    }
+    if not token or not uat:
+        logger.warning("update_doc_from_content skipped: missing token or uat")
+        return result
+    try:
+        resp = run_lark_cli([
+            "docs", "+update",
+            "--api-version", "v2",
+            "--doc", token,
+            "--command", "overwrite",
+            "--content", content,
+            "--as", "user",
+        ], uat=uat)
+        logger.info(
+            "update_doc_from_content token=%r keys=%s code=%s",
+            token,
+            sorted(resp.keys()),
+            resp.get("code"),
+        )
+        if resp.get("ok") is False or resp.get("error") or (resp.get("code") not in (None, 0)):
+            logger.error("update_doc_from_content failed: %s", resp)
+            return result
+        result.update({"status": "updated"})
+        logger.info("update_doc_from_content success token=%r", token)
+    except Exception:
+        logger.exception("update_doc_from_content failed token=%r", token)
+    return result
+
+
 def summarize_docx_xml_content(content: str) -> str:
     fields = extract_docx_xml_fields(content)
     if not fields:
