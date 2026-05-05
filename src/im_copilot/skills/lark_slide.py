@@ -105,6 +105,59 @@ def fetch_slide_ids(token: str, uat: str) -> list[str]:
         return []
 
 
+def _cli_ok(resp: dict[str, Any]) -> bool:
+    return not (resp.get("ok") is False or resp.get("error"))
+
+
+def update_slide_from_xml(token: str, slides_xml: str, uat: str) -> SkillArtifact:
+    url = f"https://www.feishu.cn/slides/{token}"
+    result: SkillArtifact = {
+        "kind": "slide",
+        "title": "",
+        "status": "error",
+        "preview": slides_xml,
+        "token": token,
+        "url": url,
+    }
+    if not token or not uat:
+        logger.warning("update_slide_from_xml skipped: missing token or uat")
+        return result
+    try:
+        slides_payload, validation_error = _validated_slides_json(slides_xml)
+        if validation_error:
+            result.update({"error": validation_error})
+            logger.error("update_slide_from_xml validation failed: %s", validation_error)
+            return result
+
+        existing_ids = fetch_slide_ids(token, uat)
+        logger.info("update_slide_from_xml token=%r existing_slides=%s", token, len(existing_ids))
+
+        for slide_id in existing_ids:
+            del_resp = run_lark_cli([
+                "slides", "xml_presentation.slide", "delete",
+                "--params", json.dumps({"xml_presentation_id": token, "slide_id": slide_id}),
+                "--as", "user",
+            ], uat=uat)
+            if not _cli_ok(del_resp):
+                logger.warning("update_slide_from_xml delete failed slide_id=%r: %s", slide_id, del_resp)
+
+        new_slides: list[str] = json.loads(slides_payload)
+        for slide_xml in new_slides:
+            create_resp = run_lark_cli([
+                "slides", "xml_presentation.slide", "create",
+                "--params", json.dumps({"xml_presentation_id": token, "slide_xml": slide_xml}),
+                "--as", "user",
+            ], uat=uat)
+            if not _cli_ok(create_resp):
+                logger.warning("update_slide_from_xml create failed: %s", create_resp)
+
+        result.update({"status": "updated"})
+        logger.info("update_slide_from_xml success token=%r slides=%s", token, len(new_slides))
+    except Exception:
+        logger.exception("update_slide_from_xml failed token=%r", token)
+    return result
+
+
 def create_slide_from_xml(
     *,
     title: str,
