@@ -169,13 +169,13 @@ def build_doc_task_message(message: str, *, markdown: bool = False) -> str:
     return task_message
 
 
-def generate_doc_content(message: str, *, existing_content: str = “”) -> str:
+def generate_doc_content(message: str, *, existing_content: str = "") -> str:
     update_section = (
-        f”\n以下是现有文档内容（DocxXML），按用户要求修改，保留无需变更的部分：\n{existing_content}”
+        f"\n以下是现有文档内容（DocxXML），按用户要求修改，保留无需变更的部分：\n{existing_content}"
         if existing_content
-        else “”
+        else ""
     )
-    prompt = f”””{_doc_generation_prompt()}
+    prompt = f"""{_doc_generation_prompt()}
 
 用户原始请求：
 {message}
@@ -191,8 +191,8 @@ def generate_doc_content(message: str, *, existing_content: str = “”) -> str
 - 如果用户原始请求包含”生成约束上下文”，必须把其中的 cite_users、whiteboards、images、checkboxes、links、grids 转化为对应 DocxXML 标签
 - 若 links 或用户输入 URL 非空，相关链接不得写”未提及相关链接”
 - 只输出文档内容，不要输出说明，不要使用代码块{update_section}
-“””
-    content = get_llm_for_node(“doc”).invoke(prompt).content
+"""
+    content = get_llm_for_node("doc").invoke(prompt).content
     return _strip_code_fence(_content_to_text(content)).strip()
 
 
