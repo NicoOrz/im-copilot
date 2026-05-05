@@ -169,12 +169,19 @@ def generate_slide_xml(
     context: str = "",
     previous_xml: str = "",
     error: str = "",
+    existing_content: str = "",
 ) -> str:
+    update_suffix = (
+        f"\n以下是现有演示文稿的 XML 内容，按用户要求修改（如风格、颜色、内容调整），"
+        f"保留无需变更的页面结构和文字：\n{existing_content[:8000]}"
+        if existing_content
+        else ""
+    )
     prompt = SLIDE_OUTLINE_PROMPT.format(
         message=message,
         context=(context or "（无）")[:9000],
         error=(error or "（无）")[:1200],
-    )
+    ) + update_suffix
     content = get_llm_for_node("slide", timeout=60, max_retries=1).invoke(prompt).content
     deck = _parse_deck(_strip_code_fence(_content_to_text(content)).strip())
     if not deck["slides"]:
