@@ -71,6 +71,10 @@ class RouteDecision(BaseModel):
     required_artifacts: list[Literal["doc", "whiteboard", "slide"]] = Field(default_factory=list)
     doc_format: Literal["xml"] = Field(default="xml", description="文档格式，固定为 DocxXML")
     reason: str = Field(default="", description="简短判断依据")
+    update_targets: list[str] = Field(
+        default_factory=list,
+        description="用户要修改的现有产物 URL 列表，新建时为空",
+    )
 
 
 @dataclass
