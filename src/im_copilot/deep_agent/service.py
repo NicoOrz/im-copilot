@@ -595,7 +595,7 @@ def _fetch_linked_doc_context(
 
 def _doc_refs_from_recent_messages(thread_id: str, chat_id: str, message: str) -> list[str]:
     refs: list[str] = []
-    for ref in _doc_refs_from_message(message):
+    for ref in _artifact_refs_from_message(message):
         if ref not in refs:
             refs.append(ref)
     for event in reversed(list_events(thread_id)[-12:]):
@@ -605,7 +605,7 @@ def _doc_refs_from_recent_messages(thread_id: str, chat_id: str, message: str) -
         if _context_payload_is_bot_request(payload):
             continue
         text = str(payload.get("text") or "")
-        for ref in _doc_refs_from_message(text):
+        for ref in _artifact_refs_from_message(text):
             if ref not in refs:
                 refs.append(ref)
     if chat_id:
@@ -615,7 +615,7 @@ def _doc_refs_from_recent_messages(thread_id: str, chat_id: str, message: str) -
             if _context_payload_is_bot_request(payload):
                 continue
             text = str(payload.get("text") or "")
-            for ref in _doc_refs_from_message(text):
+            for ref in _artifact_refs_from_message(text):
                 if ref not in refs:
                     refs.append(ref)
     return refs
@@ -633,14 +633,27 @@ def _docx_xml_richness_score(fields: dict[str, Any]) -> int:
     )
 
 
-def _doc_refs_from_message(message: str) -> list[str]:
+def _artifact_refs_from_message(message: str) -> list[str]:
     refs: list[str] = []
-    pattern = re.compile(r"https?://[^\s<>()\"']+/(?:docx|wiki)/[A-Za-z0-9_-]+")
+    pattern = re.compile(
+        r"https?://[^\s<>()\"']+/(?:docx|wiki|slides)/[A-Za-z0-9_-]+"
+    )
     for match in pattern.findall(message):
         ref = match.strip().rstrip("。.,，；;！？】])》")
         if ref and ref not in refs:
             refs.append(ref)
     return refs
+
+
+def _token_from_artifact_url(url: str) -> tuple[str, str]:
+    """返回 (kind, token)，kind 是 doc/slide，token 是产物标识符。"""
+    m = re.search(r"/(?:docx|wiki)/([A-Za-z0-9_-]+)", url)
+    if m:
+        return "doc", m.group(1)
+    m = re.search(r"/slides/([A-Za-z0-9_-]+)", url)
+    if m:
+        return "slide", m.group(1)
+    return "", ""
 
 
 def _generation_context(
