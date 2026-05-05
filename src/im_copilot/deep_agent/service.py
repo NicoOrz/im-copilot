@@ -54,7 +54,7 @@ ROUTER_PROMPT = """判断用户当前请求对应的业务类型。
 - 只看当前消息的真实目的；当前消息明确要求创建新文档、白板或 PPT 时，不能因为最近任务已完成而判为 chat。
 - 最近任务上下文只用于极短追问或修改上一产物，不能覆盖当前消息中的新创作请求。
 - 用户只是打招呼、追问、闲聊、询问信息，选择 chat。
-- 当用户意图是修改/更新/调整/重新设计现有产物时，把消息里的产物 URL 填入 update_targets；新建时 update_targets 留空列表。
+- 当用户意图是修改/更新/调整/重新设计现有产物时，把产物 URL 填入 update_targets；URL 来源：用户消息，或最近任务上下文的近期产物记录；新建时 update_targets 留空列表。
 - required_artifacts 必须列出需要创建的产物类型，chat 时为空列表。
 - 文档产物固定使用 DocxXML，doc_format 必须为 xml。
 
@@ -458,18 +458,20 @@ def _run_deterministic_artifacts(
                 token = _token_from_artifact_url(update_url)[1]
                 logger.info("run_agent slide_update start thread_id=%s token=%s", thread_id, token)
                 existing = fetch_slide_content(token, user_access_token)
-                slides_xml = generate_slide_xml(message, context=context, existing_content=existing)
+                slides_xml, _ = generate_slide_xml(message, context=context, existing_content=existing)
                 artifact = update_slide_from_xml(token, slides_xml, user_access_token)
                 artifact["url"] = update_url
             else:
-                slides_xml = generate_slide_xml(message, context=context)
+                slides_xml, cover_title = generate_slide_xml(message, context=context)
+                slide_title = cover_title or _slide_title(message)
                 logger.info(
-                    "run_agent slide_generator invoke_end thread_id=%s slides_xml_len=%s",
+                    "run_agent slide_generator invoke_end thread_id=%s slides_xml_len=%s title=%r",
                     thread_id,
                     len(slides_xml),
+                    slide_title,
                 )
                 artifact = create_slide_from_xml(
-                    title=_slide_title(message),
+                    title=slide_title,
                     slides_xml=slides_xml,
                     user_access_token=user_access_token,
                 )
@@ -480,10 +482,10 @@ def _run_deterministic_artifacts(
                         thread_id,
                         retry_error[:300],
                     )
-                    slides_xml = generate_slide_xml(
+                    slides_xml, _ = generate_slide_xml(
                         message,
                         context=context,
-                        previous_xml=slides_xml,
+                        existing_content=slides_xml,
                         error=retry_error,
                     )
                     logger.info(
@@ -492,7 +494,7 @@ def _run_deterministic_artifacts(
                         len(slides_xml),
                     )
                     artifact = create_slide_from_xml(
-                        title=_slide_title(message),
+                        title=slide_title,
                         slides_xml=slides_xml,
                         user_access_token=user_access_token,
                     )
@@ -757,11 +759,12 @@ def _truncate_context(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit] + "\n...[truncated]"
 
 
-def _filter_update_targets(decision: RouteDecision, message: str) -> RouteDecision:
-    """过滤 update_targets：只保留能在原始消息里找到的 URL，防止 LLM 幻觉。"""
+def _filter_update_targets(decision: RouteDecision, message: str, task_context: str = "") -> RouteDecision:
+    """过滤 update_targets：只保留能在原始消息或最近任务上下文里找到的 URL，防止 LLM 幻觉。"""
     if not decision.update_targets:
         return decision
-    valid = [url for url in decision.update_targets if url in message]
+    searchable = message + "\n" + task_context
+    valid = [url for url in decision.update_targets if url in searchable]
     if len(valid) == len(decision.update_targets):
         return decision
     return decision.model_copy(update={"update_targets": valid})
@@ -784,7 +787,7 @@ def _route_message(message: str, thread_id: str) -> RouteDecision:
             decision = invoke_structured("deep_agent_router", RouteDecision, prompt)
             decision = _normalize_route_decision(decision)
             decision = _continue_recent_task_if_needed(message, decision, recent_task_state)
-            decision = _filter_update_targets(decision, message)
+            decision = _filter_update_targets(decision, message, task_context)
             return decision
         except Exception as exc:
             last_error = exc
@@ -811,7 +814,7 @@ def _route_message(message: str, thread_id: str) -> RouteDecision:
         parsed = _parse_route_payload(content)
         if parsed:
             parsed = _continue_recent_task_if_needed(message, parsed, recent_task_state)
-            parsed = _filter_update_targets(parsed, message)
+            parsed = _filter_update_targets(parsed, message, task_context)
             return parsed
     except Exception as exc:
         last_error = exc
@@ -922,9 +925,14 @@ def _format_recent_task_context(state: dict[str, Any]) -> str:
         for artifact in artifacts[:3]:
             if not isinstance(artifact, dict):
                 continue
-            title = artifact.get("title") or artifact.get("kind") or "产物"
+            kind = artifact.get("kind") or "artifact"
+            title = artifact.get("title") or kind
             status = artifact.get("status") or "draft"
-            preview_parts.append(f"{artifact.get('kind') or 'artifact'}:{title}:{status}")
+            url = artifact.get("url") or ""
+            entry = f"{kind}:{title}:{status}"
+            if url:
+                entry += f" ({url})"
+            preview_parts.append(entry)
         if preview_parts:
             parts.append(f"近期产物：{'；'.join(preview_parts)}")
     summary = str(state.get("summary") or "").strip()

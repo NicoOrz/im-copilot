@@ -413,10 +413,6 @@ def _cover_title_from_xml(slide_xml: str) -> str:
     return max(candidates, key=lambda c: c[0])[1]
 
 
-def _slides_json(raw: str) -> str:
-    slides, _ = _extract_slide_xml_list(raw)
-    return json.dumps(slides or [raw], ensure_ascii=False)
-
 
 def _validated_slides_json(raw: str) -> tuple[str, str]:
     slides, error = _extract_slide_xml_list(raw)
