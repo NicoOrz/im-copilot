@@ -87,6 +87,24 @@ def create(state: Mapping[str, Any]) -> SkillArtifact:
     )
 
 
+def fetch_whiteboard_content(token: str, uat: str) -> str:
+    if not token or not uat:
+        return ""
+    try:
+        resp = run_lark_cli([
+            "whiteboard", "+query",
+            "--whiteboard-token", token,
+            "--output_as", "code",
+            "--as", "user",
+        ], uat=uat)
+        content = str(resp.get("data", {}).get("content") or resp.get("content") or "")
+        logger.info("fetch_whiteboard_content token=%r content_len=%s", token, len(content))
+        return content
+    except Exception:
+        logger.exception("fetch_whiteboard_content failed token=%r", token)
+        return ""
+
+
 def create_whiteboard_from_mermaid(
     *,
     title: str,
