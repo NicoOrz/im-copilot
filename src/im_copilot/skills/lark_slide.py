@@ -106,7 +106,12 @@ def fetch_slide_ids(token: str, uat: str) -> list[str]:
 
 
 def _cli_ok(resp: dict[str, Any]) -> bool:
-    return not (resp.get("ok") is False or resp.get("error"))
+    if not resp:
+        return False
+    if resp.get("ok") is False or resp.get("error"):
+        return False
+    code = resp.get("code")
+    return code in (None, 0)
 
 
 def update_slide_from_xml(token: str, slides_xml: str, uat: str) -> SkillArtifact:
