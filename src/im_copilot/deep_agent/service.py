@@ -21,12 +21,20 @@ from im_copilot.skills.lark_doc import (
     extract_docx_xml_fields,
     fetch_doc_content,
     summarize_docx_xml_content,
+    update_doc_from_content,
 )
 from im_copilot.skills.lark_whiteboard import (
     create_whiteboard_from_mermaid,
+    fetch_whiteboard_content,
     generate_whiteboard_mermaid,
+    update_whiteboard_from_mermaid,
 )
-from im_copilot.skills.lark_slide import create_slide_from_xml, generate_slide_xml
+from im_copilot.skills.lark_slide import (
+    create_slide_from_xml,
+    fetch_slide_content,
+    generate_slide_xml,
+    update_slide_from_xml,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -654,6 +662,15 @@ def _token_from_artifact_url(url: str) -> tuple[str, str]:
     if m:
         return "slide", m.group(1)
     return "", ""
+
+
+def _find_update_target(targets: list[str], *, kind: str) -> str:
+    """从 update_targets 里找第一个匹配 kind 的 URL，没有返回空字符串。"""
+    for url in targets:
+        k, _ = _token_from_artifact_url(url)
+        if k == kind:
+            return url
+    return ""
 
 
 def _generation_context(
