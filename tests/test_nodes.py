@@ -366,7 +366,7 @@ class MockNodeTests(unittest.TestCase):
     @patch("im_copilot.skills.lark_slide.get_llm_for_node")
     def test_slide_node_adds_slide_result(self, mock_get_llm, mock_run_cli):
         mock_llm = MockLLM()
-        mock_llm.invoke.return_value = MagicMock(content='["<slide xmlns=\\"http://www.larkoffice.com/sml/2.0\\"><data></data></slide>"]')
+        mock_llm.invoke.return_value = MagicMock(content='["<slide xmlns=\\"http://www.larkoffice.com/sml/2.0\\"><data><span fontSize=\\"36\\">测试标题</span></data></slide>"]')
         mock_get_llm.return_value = mock_llm
         mock_run_cli.return_value = {"data": {"xml_presentation_id": "ppt123", "url": "https://x/ppt123"}}
         result = slide_node({"artifacts": {}, "intent_params": {"topic": "测试"}, "user_access_token": "uat"})
@@ -395,7 +395,7 @@ class MockNodeTests(unittest.TestCase):
     @patch("im_copilot.skills.lark_slide.get_llm_for_node")
     def test_slide_node_returns_draft_on_cli_exception(self, mock_get_llm, mock_run_cli):
         mock_llm = MockLLM()
-        mock_llm.invoke.return_value = MagicMock(content='["<slide xmlns=\\"http://www.larkoffice.com/sml/2.0\\"><data></data></slide>"]')
+        mock_llm.invoke.return_value = MagicMock(content='["<slide xmlns=\\"http://www.larkoffice.com/sml/2.0\\"><data><span fontSize=\\"36\\">测试标题</span></data></slide>"]')
         mock_get_llm.return_value = mock_llm
         mock_run_cli.side_effect = RuntimeError("failed")
         result = slide_node({"artifacts": {}, "intent_params": {"topic": "测试"}, "user_access_token": "uat"})
@@ -549,6 +549,57 @@ class SlideXmlDirectTests(unittest.TestCase):
             '</data></slide>'
         )
         self.assertEqual(_cover_title_from_xml(xml), "真实标题")
+
+    @patch("im_copilot.skills.lark_slide.get_llm_for_node")
+    def test_generate_slide_xml_uses_xml_directly(self, mock_get_llm):
+        from im_copilot.skills.lark_slide import generate_slide_xml
+        import json
+        slide_xml = (
+            '<slide xmlns="http://www.larkoffice.com/sml/2.0">'
+            '<style><fill><fillColor color="rgb(15,23,42)"/></fill></style>'
+            '<data><shape type="text" topLeftX="80" topLeftY="160" width="800" height="70">'
+            '<content><p textAlign="center"><strong>'
+            '<span color="rgb(255,255,255)" fontSize="44">季度汇报</span>'
+            '</strong></p></content></shape></data></slide>'
+        )
+        mock_llm = MockLLM()
+        # LLM 直接返回 JSON XML 数组
+        mock_llm.invoke.return_value = MagicMock(content=json.dumps([slide_xml]))
+        mock_get_llm.return_value = mock_llm
+
+        result_json, cover_title = generate_slide_xml("季度汇报 PPT")
+        result = json.loads(result_json)
+        # 结果是 XML 数组，直接传透，不经过 Python 渲染器
+        self.assertIsInstance(result, list)
+        self.assertEqual(len(result), 1)
+        self.assertIn("季度汇报", result[0])
+        # 封面标题从 XML 提取，不是 fallback
+        self.assertEqual(cover_title, "季度汇报")
+
+    @patch("im_copilot.skills.lark_slide.get_llm_for_node")
+    def test_generate_slide_xml_falls_back_to_json_outline(self, mock_get_llm):
+        from im_copilot.skills.lark_slide import generate_slide_xml
+        import json
+        mock_llm = MockLLM()
+        # LLM 返回 JSON 轮廓（旧格式）
+        mock_llm.invoke.return_value = MagicMock(content=json.dumps({
+            "style": "business",
+            "slides": [
+                {"layout": "cover", "title": "旧格式标题", "subtitle": "", "bullets": ["要点"], "metrics": []},
+                {"layout": "content", "title": "内容页", "subtitle": "", "bullets": ["要点 A", "要点 B"], "metrics": []},
+                {"layout": "content", "title": "内容页2", "subtitle": "", "bullets": ["C", "D"], "metrics": []},
+                {"layout": "action", "title": "行动", "subtitle": "", "bullets": ["任务 1"], "metrics": []},
+                {"layout": "closing", "title": "感谢", "subtitle": "", "bullets": [], "metrics": []},
+            ]
+        }))
+        mock_get_llm.return_value = mock_llm
+
+        result_json, cover_title = generate_slide_xml("旧格式 PPT")
+        result = json.loads(result_json)
+        self.assertIsInstance(result, list)
+        self.assertGreater(len(result), 0)
+        # fallback 路径通过 deck 提取 cover title
+        self.assertEqual(cover_title, "旧格式标题")
 
 
 if __name__ == "__main__":

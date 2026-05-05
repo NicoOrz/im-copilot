@@ -231,8 +231,7 @@ def generate_slide_xml(
 ) -> tuple[str, str]:
     """返回 (slides_xml, cover_title)，cover_title 是封面标题，可用于演示文稿命名。"""
     update_suffix = (
-        f"\n以下是现有演示文稿的 XML 内容，按用户要求修改（如风格、颜色、内容调整），"
-        f"保留无需变更的页面结构和文字：\n{existing_content[:8000]}"
+        f"\n\n现有演示文稿 XML（按用户要求修改，保留无需变更的页面）：\n{existing_content[:8000]}"
         if existing_content
         else ""
     )
@@ -242,7 +241,16 @@ def generate_slide_xml(
         error=(error or "（无）")[:1200],
     ) + update_suffix
     content = get_llm_for_node("slide", timeout=60, max_retries=1).invoke(prompt).content
-    deck = _parse_deck(_strip_code_fence(_content_to_text(content)).strip())
+    raw = _strip_code_fence(_content_to_text(content)).strip()
+
+    # 优先路径：LLM 直接输出 XML 数组
+    slides, xml_error = _extract_slide_xml_list(raw)
+    if slides and not xml_error:
+        cover_title = _cover_title_from_xml(slides[0])
+        return json.dumps(slides, ensure_ascii=False), cover_title
+
+    # Fallback：解析 JSON 轮廓 → Python 渲染器
+    deck = _parse_deck(raw)
     if not deck["slides"]:
         deck = {"style": "business", "slides": _fallback_outline(message, context)}
     cover_title = _cover_title_from_deck(deck)
