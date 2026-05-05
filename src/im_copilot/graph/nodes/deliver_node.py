@@ -23,6 +23,8 @@ def _artifact_status_text(status: str) -> str:
         return "已生成草稿"
     if status == "error":
         return "生成失败"
+    if status == "updated":
+        return "已更新"
     return status or "已生成"
 
 

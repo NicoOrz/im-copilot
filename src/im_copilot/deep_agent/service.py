@@ -77,7 +77,7 @@ class RouteDecision(BaseModel):
 class Artifact:
     kind: str
     title: str
-    status: Literal["draft", "created", "error"]
+    status: Literal["draft", "created", "updated", "error"]
     preview: str = ""
     token: str = ""
     url: str = ""
