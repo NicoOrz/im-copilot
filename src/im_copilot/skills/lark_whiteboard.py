@@ -105,6 +105,40 @@ def fetch_whiteboard_content(token: str, uat: str) -> str:
         return ""
 
 
+def update_whiteboard_from_mermaid(token: str, mermaid: str, uat: str) -> SkillArtifact:
+    url = f"https://www.feishu.cn/docx/{token}"
+    result: SkillArtifact = {
+        "kind": "whiteboard",
+        "title": "",
+        "status": "error",
+        "preview": mermaid,
+        "token": token,
+        "url": url,
+    }
+    if not token or not uat:
+        logger.warning("update_whiteboard_from_mermaid skipped: missing token or uat")
+        return result
+    mermaid = _normalize_mermaid_text(_strip_code_fence(str(mermaid or "")).strip())
+    try:
+        resp = run_lark_cli([
+            "whiteboard", "+update",
+            "--whiteboard-token", token,
+            "--source", "-",
+            "--input_format", "mermaid",
+            "--overwrite",
+            "--yes",
+            "--as", "user",
+        ], uat=uat, stdin=mermaid)
+        if _cli_ok(resp):
+            result.update({"status": "updated"})
+            logger.info("update_whiteboard_from_mermaid success token=%r", token)
+        else:
+            logger.error("update_whiteboard_from_mermaid failed: %s", resp)
+    except Exception:
+        logger.exception("update_whiteboard_from_mermaid failed token=%r", token)
+    return result
+
+
 def create_whiteboard_from_mermaid(
     *,
     title: str,
