@@ -13,10 +13,169 @@ from im_copilot.skills.base import SkillArtifact
 
 logger = logging.getLogger(__name__)
 
-SLIDE_OUTLINE_PROMPT = """你是飞书汇报 PPT 内容规划助手。只输出 JSON，不要输出 Markdown 或说明文字。
+SLIDE_XML_PROMPT = """你是飞书 PPT 生成助手。输出一个 JSON 数组，每个元素是一页幻灯片的完整 XML 字符串。
+只输出 JSON 数组，不要输出 Markdown 代码块、说明文字或其他内容。
 
-用户请求：
-{message}
+画布尺寸：宽 960px，高 540px。
+
+关键约束：
+1. 渐变色必须用 rgba() + 百分比停靠点，如 `linear-gradient(135deg,rgba(15,23,42,1) 0%,rgba(56,97,140,1) 100%)`；用 rgb() 或省略停靠点会变白
+2. `<content>` 的直接子元素只能是 `<p>`、`<ul>`、`<ol>`
+3. 文字颜色和字号通过 `<span color="..." fontSize="...">文字</span>` 内联样式设置
+4. 每页必须有明确标题和可见中文内容
+5. slides 数量 5 到 8 页，第一页封面，最后一页结尾
+6. bullets 每页 2 到 5 条，不要大段正文
+7. 根据主题选择风格：科技/AI → 深色背景；商务汇报 → 浅色背景；未指定默认浅色
+8. 参考内容只作为事实来源，不要把 XML/JSON 结构当页面内容
+
+---
+
+## 模板示例
+
+### 深色封面页（第一页必须是这种风格）
+
+```xml
+<slide xmlns="http://www.larkoffice.com/sml/2.0">
+  <style><fill><fillColor color="linear-gradient(135deg,rgba(15,23,42,1) 0%,rgba(56,97,140,1) 100%)"/></fill></style>
+  <data>
+    <shape type="text" topLeftX="80" topLeftY="160" width="800" height="70">
+      <content><p textAlign="center"><strong><span color="rgb(255,255,255)" fontSize="44">主标题</span></strong></p></content>
+    </shape>
+    <shape type="text" topLeftX="80" topLeftY="250" width="800" height="35">
+      <content><p textAlign="center"><span color="rgb(148,163,184)" fontSize="20">副标题</span></p></content>
+    </shape>
+    <shape type="text" topLeftX="80" topLeftY="420" width="800" height="25">
+      <content><p textAlign="center"><span color="rgb(100,116,139)" fontSize="14">底部信息</span></p></content>
+    </shape>
+  </data>
+</slide>
+```
+
+### 浅色内容页（通用正文页）
+
+```xml
+<slide xmlns="http://www.larkoffice.com/sml/2.0">
+  <style><fill><fillColor color="rgb(248,250,252)"/></fill></style>
+  <data>
+    <shape type="rect" topLeftX="60" topLeftY="40" width="4" height="35">
+      <fill><fillColor color="rgb(59,130,246)"/></fill>
+    </shape>
+    <shape type="text" topLeftX="76" topLeftY="36" width="600" height="45">
+      <content><p><strong><span color="rgb(15,23,42)" fontSize="28">页面标题</span></strong></p></content>
+    </shape>
+    <shape type="text" topLeftX="60" topLeftY="100" width="840" height="380">
+      <content textType="body" lineSpacing="multiple:1.8">
+        <p><span color="rgb(51,65,85)" fontSize="15">正文段落</span></p>
+        <ul>
+          <li><p><span color="rgb(51,65,85)" fontSize="15">要点一</span></p></li>
+          <li><p><span color="rgb(51,65,85)" fontSize="15">要点二</span></p></li>
+          <li><p><span color="rgb(51,65,85)" fontSize="15">要点三</span></p></li>
+        </ul>
+      </content>
+    </shape>
+  </data>
+</slide>
+```
+
+### 数据卡片页（横排指标）
+
+```xml
+<slide xmlns="http://www.larkoffice.com/sml/2.0">
+  <style><fill><fillColor color="rgb(248,250,252)"/></fill></style>
+  <data>
+    <shape type="text" topLeftX="60" topLeftY="36" width="600" height="45">
+      <content><p><strong><span color="rgb(15,23,42)" fontSize="28">数据概览</span></strong></p></content>
+    </shape>
+    <shape type="rect" topLeftX="60" topLeftY="100" width="260" height="140">
+      <fill><fillColor color="rgb(255,255,255)"/></fill>
+      <border color="rgba(0,0,0,0.08)" width="1"/>
+    </shape>
+    <shape type="text" topLeftX="60" topLeftY="115" width="260" height="50">
+      <content><p textAlign="center"><strong><span color="rgb(59,130,246)" fontSize="36">数值</span></strong></p></content>
+    </shape>
+    <shape type="text" topLeftX="60" topLeftY="175" width="260" height="25">
+      <content><p textAlign="center"><span color="rgb(100,116,139)" fontSize="14">指标名称</span></p></content>
+    </shape>
+    <shape type="rect" topLeftX="350" topLeftY="100" width="260" height="140">
+      <fill><fillColor color="rgb(255,255,255)"/></fill>
+      <border color="rgba(0,0,0,0.08)" width="1"/>
+    </shape>
+    <shape type="text" topLeftX="350" topLeftY="115" width="260" height="50">
+      <content><p textAlign="center"><strong><span color="rgb(59,130,246)" fontSize="36">数值2</span></strong></p></content>
+    </shape>
+    <shape type="text" topLeftX="350" topLeftY="175" width="260" height="25">
+      <content><p textAlign="center"><span color="rgb(100,116,139)" fontSize="14">指标名称2</span></p></content>
+    </shape>
+    <shape type="rect" topLeftX="640" topLeftY="100" width="260" height="140">
+      <fill><fillColor color="rgb(255,255,255)"/></fill>
+      <border color="rgba(0,0,0,0.08)" width="1"/>
+    </shape>
+    <shape type="text" topLeftX="640" topLeftY="115" width="260" height="50">
+      <content><p textAlign="center"><strong><span color="rgb(59,130,246)" fontSize="36">数值3</span></strong></p></content>
+    </shape>
+    <shape type="text" topLeftX="640" topLeftY="175" width="260" height="25">
+      <content><p textAlign="center"><span color="rgb(100,116,139)" fontSize="14">指标名称3</span></p></content>
+    </shape>
+  </data>
+</slide>
+```
+
+### 行动计划页（编号列表）
+
+```xml
+<slide xmlns="http://www.larkoffice.com/sml/2.0">
+  <style><fill><fillColor color="rgb(248,250,252)"/></fill></style>
+  <data>
+    <shape type="text" topLeftX="60" topLeftY="38" width="820" height="55">
+      <content><p><strong><span color="rgb(15,23,42)" fontSize="28">行动计划</span></strong></p></content>
+    </shape>
+    <line startX="60" startY="102" endX="900" endY="102">
+      <border color="rgb(59,130,246)" width="2"/>
+    </line>
+    <shape type="text" topLeftX="78" topLeftY="135" width="70" height="28">
+      <content><p><strong><span color="rgb(59,130,246)" fontSize="16">01</span></strong></p></content>
+    </shape>
+    <shape type="text" topLeftX="150" topLeftY="135" width="730" height="34">
+      <content><p><span color="rgb(30,41,59)" fontSize="16">第一条行动项</span></p></content>
+    </shape>
+    <shape type="text" topLeftX="78" topLeftY="193" width="70" height="28">
+      <content><p><strong><span color="rgb(59,130,246)" fontSize="16">02</span></strong></p></content>
+    </shape>
+    <shape type="text" topLeftX="150" topLeftY="193" width="730" height="34">
+      <content><p><span color="rgb(30,41,59)" fontSize="16">第二条行动项</span></p></content>
+    </shape>
+    <shape type="text" topLeftX="78" topLeftY="251" width="70" height="28">
+      <content><p><strong><span color="rgb(59,130,246)" fontSize="16">03</span></strong></p></content>
+    </shape>
+    <shape type="text" topLeftX="150" topLeftY="251" width="730" height="34">
+      <content><p><span color="rgb(30,41,59)" fontSize="16">第三条行动项</span></p></content>
+    </shape>
+  </data>
+</slide>
+```
+
+### 深色结尾页（最后一页必须是这种风格）
+
+```xml
+<slide xmlns="http://www.larkoffice.com/sml/2.0">
+  <style><fill><fillColor color="linear-gradient(135deg,rgba(15,23,42,1) 0%,rgba(56,97,140,1) 100%)"/></fill></style>
+  <data>
+    <shape type="text" topLeftX="80" topLeftY="190" width="800" height="55">
+      <content><p textAlign="center"><strong><span color="rgb(255,255,255)" fontSize="36">感谢语或行动号召</span></strong></p></content>
+    </shape>
+    <line startX="410" startY="260" endX="550" endY="260">
+      <border color="rgb(59,130,246)" width="2"/>
+    </line>
+    <shape type="text" topLeftX="80" topLeftY="280" width="800" height="30">
+      <content><p textAlign="center"><span color="rgb(148,163,184)" fontSize="16">补充说明</span></p></content>
+    </shape>
+  </data>
+</slide>
+```
+
+---
+
+用户请求：{message}
 
 参考内容：
 {context}
@@ -24,29 +183,7 @@ SLIDE_OUTLINE_PROMPT = """你是飞书汇报 PPT 内容规划助手。只输出 
 创建失败信息：
 {error}
 
-吸收的 lark-slides 设计规则：
-- 这是演示文稿，不是文档；每页信息密度低于文档，必须保留清晰层级和留白。
-- 根据主题选择风格：科技/AI/产品用 tech；商务汇报/季度总结用 business；周报/日常汇报用 weekly；培训教程用 fresh；未指定用 business。
-- 页面类型从这些值中选择：cover、summary、section、content、metrics、action、timeline、closing。
-- 推荐结构：封面页、核心结论或数据概览、主题内容页、Action 项或时间线、结尾页。
-- 内容页不要堆长段落；每页 bullets 控制在 2 到 5 条。
-- Action 页适合负责人、任务、期限；timeline 页适合里程碑；metrics 页适合数字、目标、百分比、耗时等指标。
-- 不要输出 XML；XML 由代码按飞书 slides 协议渲染。
-- 不得生成空白页；每页必须有明确标题和可见中文内容。
-- 参考内容只作为事实来源；不要把既有产物预览、内部提示文本、XML 或 JSON 结构当作页面内容。
-
-要求：
-- 输出 JSON 对象：{{"style":"business|tech|weekly|fresh","slides":[...]}}
-- slides 数组长度 5 到 8
-- 每个 slide 包含 layout、title、subtitle、bullets、metrics
-- layout 只能是 cover、summary、section、content、metrics、action、timeline、closing
-- title 是页面标题
-- subtitle 是可选短说明，没有则为空字符串
-- bullets 是 2 到 5 条中文要点
-- metrics 是可选数组，每个元素包含 label、value、note；无指标则为空数组
-- 内容忠实覆盖参考内容，不添加无依据事实
-- title 不得为空；bullets 不能为空
-- 不要输出 XML
+输出 JSON 数组，如：["<slide ...>...</slide>", "<slide ...>...</slide>", ...]
 """
 
 
@@ -235,7 +372,7 @@ def generate_slide_xml(
         if existing_content
         else ""
     )
-    prompt = SLIDE_OUTLINE_PROMPT.format(
+    prompt = SLIDE_XML_PROMPT.format(
         message=message,
         context=(context or "（无）")[:9000],
         error=(error or "（无）")[:1200],
