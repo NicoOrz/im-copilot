@@ -174,11 +174,16 @@ def create_whiteboard_from_mermaid(
     return result
 
 
-def generate_whiteboard_mermaid(message: str, *, context: str = "") -> str:
+def generate_whiteboard_mermaid(message: str, *, context: str = "", existing_content: str = "") -> str:
+    update_suffix = (
+        f"\n以下是现有白板内容（Mermaid），按用户要求修改，保留无需变更的部分：\n{existing_content}"
+        if existing_content
+        else ""
+    )
     prompt = WHITEBOARD_MERMAID_PROMPT.format(
         context=(context or "（无）")[:9000],
         message=message,
-    )
+    ) + update_suffix
     content = get_llm_for_node("whiteboard").invoke(prompt).content
     mermaid = _strip_code_fence(_content_to_text(content)).strip()
     return _clean_mermaid(mermaid)
