@@ -25,9 +25,7 @@ from im_copilot.skills.lark_doc import (
 )
 from im_copilot.skills.lark_whiteboard import (
     create_whiteboard_from_mermaid,
-    fetch_whiteboard_content,
     generate_whiteboard_mermaid,
-    update_whiteboard_from_mermaid,
 )
 from im_copilot.skills.lark_slide import (
     create_slide_from_xml,
