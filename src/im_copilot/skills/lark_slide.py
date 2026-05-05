@@ -54,9 +54,9 @@ def create(state: Mapping[str, Any]) -> SkillArtifact:
     topic = state.get("intent_params", {}).get("topic", "未命名PPT")
     raw_message = state.get("raw_message", "")
     uat = state.get("user_access_token", "")
-    title = f"PPT：{topic}"
 
-    slides_xml = generate_slide_xml(raw_message)
+    slides_xml, cover_title = generate_slide_xml(raw_message)
+    title = cover_title or f"PPT：{topic}"
 
     return create_slide_from_xml(
         title=title,
@@ -228,7 +228,8 @@ def generate_slide_xml(
     previous_xml: str = "",
     error: str = "",
     existing_content: str = "",
-) -> str:
+) -> tuple[str, str]:
+    """返回 (slides_xml, cover_title)，cover_title 是封面标题，可用于演示文稿命名。"""
     update_suffix = (
         f"\n以下是现有演示文稿的 XML 内容，按用户要求修改（如风格、颜色、内容调整），"
         f"保留无需变更的页面结构和文字：\n{existing_content[:8000]}"
@@ -244,7 +245,27 @@ def generate_slide_xml(
     deck = _parse_deck(_strip_code_fence(_content_to_text(content)).strip())
     if not deck["slides"]:
         deck = {"style": "business", "slides": _fallback_outline(message, context)}
-    return json.dumps(_render_slides(deck["slides"], style=deck["style"]), ensure_ascii=False)
+    cover_title = _cover_title_from_deck(deck)
+    return json.dumps(_render_slides(deck["slides"], style=deck["style"]), ensure_ascii=False), cover_title
+
+
+def _cover_title_from_deck(deck: dict[str, Any]) -> str:
+    for slide in (deck.get("slides") or []):
+        if isinstance(slide, dict):
+            title = str(slide.get("title") or "").strip()
+            if title:
+                return title
+    return ""
+
+
+def _cover_title_from_xml(slide_xml: str) -> str:
+    matches = re.findall(r'fontSize="(\d+)"[^>]*>([^<]+)</span>', slide_xml)
+    if not matches:
+        return ""
+    candidates = [(int(fs), text.strip()) for fs, text in matches if text.strip()]
+    if not candidates:
+        return ""
+    return max(candidates, key=lambda c: c[0])[1]
 
 
 def _slides_json(raw: str) -> str:

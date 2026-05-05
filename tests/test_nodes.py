@@ -515,5 +515,41 @@ class SideAgentNodeTests(unittest.TestCase):
         self.assertEqual(result["side_agent_results"][0]["task"], "none")
 
 
+class SlideXmlDirectTests(unittest.TestCase):
+    def test_cover_title_from_xml_picks_largest_font(self):
+        from im_copilot.skills.lark_slide import _cover_title_from_xml
+        xml = (
+            '<slide xmlns="http://www.larkoffice.com/sml/2.0">'
+            '<data>'
+            '<shape type="text"><content><p>'
+            '<strong><span color="rgb(255,255,255)" fontSize="44">季度汇报</span></strong>'
+            '</p></content></shape>'
+            '<shape type="text"><content><p>'
+            '<span color="rgb(148,163,184)" fontSize="20">副标题</span>'
+            '</p></content></shape>'
+            '</data></slide>'
+        )
+        self.assertEqual(_cover_title_from_xml(xml), "季度汇报")
+
+    def test_cover_title_from_xml_returns_empty_on_no_span(self):
+        from im_copilot.skills.lark_slide import _cover_title_from_xml
+        xml = '<slide><data><shape type="text"><content><p>纯文字</p></content></shape></data></slide>'
+        self.assertEqual(_cover_title_from_xml(xml), "")
+
+    def test_cover_title_from_xml_skips_whitespace_only(self):
+        from im_copilot.skills.lark_slide import _cover_title_from_xml
+        xml = (
+            '<slide><data>'
+            '<shape type="text"><content><p>'
+            '<span color="rgb(255,255,255)" fontSize="44">  </span>'
+            '</p></content></shape>'
+            '<shape type="text"><content><p>'
+            '<span color="rgb(148,163,184)" fontSize="20">真实标题</span>'
+            '</p></content></shape>'
+            '</data></slide>'
+        )
+        self.assertEqual(_cover_title_from_xml(xml), "真实标题")
+
+
 if __name__ == "__main__":
     unittest.main()
