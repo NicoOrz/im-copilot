@@ -362,26 +362,36 @@ def _run_deterministic_artifacts(
                 len(context),
             )
             doc_message = _message_with_context(message, context)
-            content = generate_doc_content(doc_message)
-            missing_requirements = _missing_docx_xml_requirements(context, content)
-            if missing_requirements:
-                logger.warning(
-                    "run_agent doc_generator missing_requirements thread_id=%s requirements=%s",
+
+            update_url = _find_update_target(route.update_targets, kind="doc")
+            if update_url and user_access_token:
+                token = _token_from_artifact_url(update_url)[1]
+                logger.info("run_agent doc_update start thread_id=%s token=%s", thread_id, token)
+                existing = fetch_doc_content(update_url, user_access_token=user_access_token, doc_format="xml")
+                content = generate_doc_content(doc_message, existing_content=existing)
+                artifact = update_doc_from_content(token, content, user_access_token)
+                artifact["url"] = update_url
+            else:
+                content = generate_doc_content(doc_message)
+                missing_requirements = _missing_docx_xml_requirements(context, content)
+                if missing_requirements:
+                    logger.warning(
+                        "run_agent doc_generator missing_requirements thread_id=%s requirements=%s",
+                        thread_id,
+                        missing_requirements,
+                    )
+                    content = generate_doc_content(_doc_rewrite_message(doc_message, content, missing_requirements))
+                logger.info(
+                    "run_agent doc_generator invoke_end thread_id=%s content_len=%s",
                     thread_id,
-                    missing_requirements,
+                    len(content),
                 )
-                content = generate_doc_content(_doc_rewrite_message(doc_message, content, missing_requirements))
-            logger.info(
-                "run_agent doc_generator invoke_end thread_id=%s content_len=%s",
-                thread_id,
-                len(content),
-            )
-            artifact = create_doc_from_content(
-                title=_doc_title_from_content(content) or _doc_title(message),
-                content=content,
-                user_access_token=user_access_token,
-                doc_format="xml",
-            )
+                artifact = create_doc_from_content(
+                    title=_doc_title_from_content(content) or _doc_title(message),
+                    content=content,
+                    user_access_token=user_access_token,
+                    doc_format="xml",
+                )
             artifacts["doc"] = dict(artifact)
             record_event(thread_id, source, "artifact_created", {"kind": "doc", "artifact": dict(artifact)})
             logger.info(
@@ -445,32 +455,18 @@ def _run_deterministic_artifacts(
                 len(message),
                 len(context),
             )
-            slides_xml = generate_slide_xml(message, context=context)
-            logger.info(
-                "run_agent slide_generator invoke_end thread_id=%s slides_xml_len=%s",
-                thread_id,
-                len(slides_xml),
-            )
-            artifact = create_slide_from_xml(
-                title=_slide_title(message),
-                slides_xml=slides_xml,
-                user_access_token=user_access_token,
-            )
-            if artifact.get("status") != "created":
-                retry_error = str(artifact.get("error") or "")
+            update_url = _find_update_target(route.update_targets, kind="slide")
+            if update_url and user_access_token:
+                token = _token_from_artifact_url(update_url)[1]
+                logger.info("run_agent slide_update start thread_id=%s token=%s", thread_id, token)
+                existing = fetch_slide_content(token, user_access_token)
+                slides_xml = generate_slide_xml(message, context=context, existing_content=existing)
+                artifact = update_slide_from_xml(token, slides_xml, user_access_token)
+                artifact["url"] = update_url
+            else:
+                slides_xml = generate_slide_xml(message, context=context)
                 logger.info(
-                    "run_agent slide_generator retry_start thread_id=%s error=%s",
-                    thread_id,
-                    retry_error[:300],
-                )
-                slides_xml = generate_slide_xml(
-                    message,
-                    context=context,
-                    previous_xml=slides_xml,
-                    error=retry_error,
-                )
-                logger.info(
-                    "run_agent slide_generator retry_end thread_id=%s slides_xml_len=%s",
+                    "run_agent slide_generator invoke_end thread_id=%s slides_xml_len=%s",
                     thread_id,
                     len(slides_xml),
                 )
@@ -479,6 +475,29 @@ def _run_deterministic_artifacts(
                     slides_xml=slides_xml,
                     user_access_token=user_access_token,
                 )
+                if artifact.get("status") != "created":
+                    retry_error = str(artifact.get("error") or "")
+                    logger.info(
+                        "run_agent slide_generator retry_start thread_id=%s error=%s",
+                        thread_id,
+                        retry_error[:300],
+                    )
+                    slides_xml = generate_slide_xml(
+                        message,
+                        context=context,
+                        previous_xml=slides_xml,
+                        error=retry_error,
+                    )
+                    logger.info(
+                        "run_agent slide_generator retry_end thread_id=%s slides_xml_len=%s",
+                        thread_id,
+                        len(slides_xml),
+                    )
+                    artifact = create_slide_from_xml(
+                        title=_slide_title(message),
+                        slides_xml=slides_xml,
+                        user_access_token=user_access_token,
+                    )
             artifacts["slide"] = dict(artifact)
             record_event(thread_id, source, "artifact_created", {"kind": "slide", "artifact": dict(artifact)})
             logger.info(
