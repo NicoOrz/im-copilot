@@ -723,6 +723,16 @@ def _truncate_context(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit] + "\n...[truncated]"
 
 
+def _filter_update_targets(decision: RouteDecision, message: str) -> RouteDecision:
+    """过滤 update_targets：只保留能在原始消息里找到的 URL，防止 LLM 幻觉。"""
+    if not decision.update_targets:
+        return decision
+    valid = [url for url in decision.update_targets if url in message]
+    if len(valid) == len(decision.update_targets):
+        return decision
+    return decision.model_copy(update={"update_targets": valid})
+
+
 def _route_message(message: str, thread_id: str) -> RouteDecision:
     history = _message_history(thread_id)
     history_text = "\n".join(f"{item['role']}: {item['content']}" for item in history[-6:])
@@ -740,6 +750,7 @@ def _route_message(message: str, thread_id: str) -> RouteDecision:
             decision = invoke_structured("deep_agent_router", RouteDecision, prompt)
             decision = _normalize_route_decision(decision)
             decision = _continue_recent_task_if_needed(message, decision, recent_task_state)
+            decision = _filter_update_targets(decision, message)
             return decision
         except Exception as exc:
             last_error = exc
@@ -766,6 +777,7 @@ def _route_message(message: str, thread_id: str) -> RouteDecision:
         parsed = _parse_route_payload(content)
         if parsed:
             parsed = _continue_recent_task_if_needed(message, parsed, recent_task_state)
+            parsed = _filter_update_targets(parsed, message)
             return parsed
     except Exception as exc:
         last_error = exc
