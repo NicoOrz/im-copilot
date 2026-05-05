@@ -8,7 +8,7 @@ from typing import Any, Literal, TypedDict
 class SkillArtifact(TypedDict, total=False):
     kind: str
     title: str
-    status: Literal["draft", "created", "error"]
+    status: Literal["draft", "created", "updated", "error"]
     preview: str
     token: str
     url: str
