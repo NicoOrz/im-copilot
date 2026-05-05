@@ -289,6 +289,13 @@ def _parse_route_payload(content: str) -> RouteDecision | None:
         return None
     if not isinstance(payload, dict):
         return None
+    raw_targets: list[str] = payload.get("update_targets") or []
+    validated_targets: list[str] = []
+    if isinstance(raw_targets, list):
+        for url in raw_targets:
+            if isinstance(url, str) and url.strip():
+                validated_targets.append(url.strip())
+
     try:
         decision = RouteDecision(
             route=str(payload.get("route", "chat")),
@@ -298,6 +305,7 @@ def _parse_route_payload(content: str) -> RouteDecision | None:
             ],
             doc_format="xml",
             reason=str(payload.get("reason", "")),
+            update_targets=validated_targets,
         )
     except Exception:
         return None
