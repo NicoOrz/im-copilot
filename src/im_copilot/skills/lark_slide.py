@@ -231,12 +231,21 @@ def fetch_slide_ids(token: str, uat: str) -> list[str]:
             "--params", json.dumps({"xml_presentation_id": token}),
             "--as", "user",
         ], uat=uat)
+        # 优先从 JSON 数组取（兼容未来 API 变更）
         slides = (
             resp.get("data", {}).get("slides")
             or resp.get("slides")
             or []
         )
-        ids = [str(s.get("slide_id") or s.get("id") or "") for s in slides if isinstance(s, dict)]
+        if slides and isinstance(slides[0], dict):
+            ids = [str(s.get("slide_id") or s.get("id") or "") for s in slides if isinstance(s, dict)]
+        else:
+            # 从 presentation XML 中解析 <slide id="...">
+            xml_content = (
+                resp.get("data", {}).get("xml_presentation", {}).get("content", "")
+                or resp.get("content", "")
+            )
+            ids = re.findall(r'<slide\b[^>]*\bid="([^"]+)"', xml_content)
         ids = [i for i in ids if i]
         logger.info("fetch_slide_ids token=%r count=%s", token, len(ids))
         return ids
@@ -268,7 +277,7 @@ def update_slide_from_xml(token: str, slides_xml: str, uat: str) -> SkillArtifac
         logger.warning("update_slide_from_xml skipped: missing token or uat")
         return result
     try:
-        slides_payload, validation_error = _validated_slides_json(slides_xml)
+        slides_payload, validation_error = _validated_slides_json(slides_xml, max_pages=20)
         if validation_error:
             result.update({"error": validation_error})
             logger.error("update_slide_from_xml validation failed: %s", validation_error)
@@ -381,40 +390,121 @@ def generate_slide_xml(
     existing_content: str = "",
 ) -> tuple[str, str]:
     """返回 (slides_xml, cover_title)，cover_title 是封面标题，可用于演示文稿命名。"""
-    update_suffix = ""
     if existing_content:
-        annotated = _annotate_existing_slides(existing_content)
-        update_suffix = (
-            "\n\n## 现有演示文稿结构\n\n"
-            f"{annotated}\n\n"
-            "## 修改规则\n"
-            "- 输出完整的 slides JSON 数组（包含所有页面）\n"
-            "- 保留【封面页】和【结尾页】的 XML 不变，原样输出\n"
-            "- 新增页面插入到【结尾页】之前\n"
-            "- 严格按用户要求的页数新增，不要多加\n"
-            "- 不要生成新的结尾页\n"
-        )
+        return _generate_update_slides(message, context=context, error=error, existing_content=existing_content)
+
     prompt = SLIDE_XML_PROMPT.format(
         message=message,
         context=(context or "（无）")[:9000],
         error=(error or "（无）")[:1200],
-    ) + update_suffix
+    )
     content = get_llm_for_node("slide", timeout=60, max_retries=1).invoke(prompt).content
     raw = _strip_code_fence(_content_to_text(content)).strip()
 
-    # 优先路径：LLM 直接输出 XML 数组
     slides, xml_error = _extract_slide_xml_list(raw)
     if slides and not xml_error:
         slides = _ensure_closing_slide_last(slides)
         cover_title = _cover_title_from_xml(slides[0])
         return json.dumps(slides, ensure_ascii=False), cover_title
 
-    # Fallback：解析 JSON 轮廓 → Python 渲染器
     deck = _parse_deck(raw)
     if not deck["slides"]:
         deck = {"style": "business", "slides": _fallback_outline(message, context)}
     cover_title = _cover_title_from_deck(deck)
     return json.dumps(_render_slides(deck["slides"], style=deck["style"]), ensure_ascii=False), cover_title
+
+
+SLIDE_UPDATE_PROMPT = """你是飞书 PPT 编辑助手。用户要求对现有演示文稿进行修改。
+只输出【新增或修改的页面】的 JSON 数组，不要输出已有的未变更页面。
+只输出 JSON 数组，不要输出 Markdown 代码块、说明文字或其他内容。
+
+画布尺寸：宽 960px，高 540px。
+
+关键约束：
+1. 渐变色必须用 rgba() + 百分比停靠点
+2. `<content>` 的直接子元素只能是 `<p>`、`<ul>`、`<ol>`
+3. 文字颜色和字号通过 `<span color="..." fontSize="...">文字</span>` 设置
+4. 每页必须有明确标题和可见中文内容
+5. 严格按用户要求的页数生成，用户说加 1 页就只输出 1 页
+6. bullets 每页 2 到 5 条
+7. 不要输出封面页或结尾页
+8. 不要添加用户未要求的信息
+9. 使用浅色内容页风格（背景 rgb(248,250,252)），与现有页面保持一致
+
+现有演示文稿完整内容：
+{existing_content}
+
+用户请求：{message}
+
+参考内容：
+{context}
+
+创建失败信息：
+{error}
+
+输出 JSON 数组（只含新增页面）：["<slide ...>...</slide>"]
+"""
+
+
+def _generate_update_slides(
+    message: str,
+    *,
+    context: str = "",
+    error: str = "",
+    existing_content: str = "",
+) -> tuple[str, str]:
+    """更新场景：LLM 只生成新增页面，代码负责插入到结尾页之前。"""
+    existing_slides = _extract_slides_from_presentation(existing_content)
+    annotated = _annotate_existing_slides(existing_content)
+
+    prompt = SLIDE_UPDATE_PROMPT.format(
+        message=message,
+        context=(context or "（无）")[:9000],
+        error=(error or "（无）")[:1200],
+        existing_content=annotated,
+    )
+    content = get_llm_for_node("slide", timeout=60, max_retries=1).invoke(prompt).content
+    raw = _strip_code_fence(_content_to_text(content)).strip()
+
+    new_slides, xml_error = _extract_slide_xml_list(raw)
+    if not new_slides or xml_error:
+        logger.warning("_generate_update_slides LLM output invalid: %s", xml_error)
+        return json.dumps(existing_slides, ensure_ascii=False), ""
+
+    merged = _insert_before_closing(existing_slides, new_slides)
+    cover_title = _cover_title_from_xml(merged[0]) if merged else ""
+    return json.dumps(merged, ensure_ascii=False), cover_title
+
+
+def _extract_slides_from_presentation(content: str) -> list[str]:
+    """从 presentation XML 或 JSON 响应中提取各页 slide XML。"""
+    try:
+        parsed = json.loads(content)
+        xml_str = (
+            parsed.get("data", {}).get("xml_presentation", {}).get("content", "")
+            or parsed.get("content", "")
+        )
+        if xml_str:
+            content = xml_str
+    except (json.JSONDecodeError, AttributeError):
+        pass
+
+    slides = re.findall(r"<slide\b[^>]*>.*?</slide>", content, flags=re.DOTALL)
+    return [_sanitize_slide_xml(s) for s in slides]
+
+
+def _insert_before_closing(existing: list[str], new_pages: list[str]) -> list[str]:
+    """将新页面插入到结尾页之前。"""
+    if not existing:
+        return new_pages
+
+    # 从后往前找结尾页
+    for i in range(len(existing) - 1, 0, -1):
+        if _is_closing_slide(existing[i]):
+            return existing[:i] + new_pages + existing[i:]
+
+    # 没找到结尾页，追加到最后
+    return existing + new_pages
 
 
 def _sanitize_slide_xml(xml: str) -> str:
@@ -518,12 +608,12 @@ def _cover_title_from_xml(slide_xml: str) -> str:
 
 
 
-def _validated_slides_json(raw: str) -> tuple[str, str]:
+def _validated_slides_json(raw: str, *, max_pages: int = 10) -> tuple[str, str]:
     slides, error = _extract_slide_xml_list(raw)
     if error:
         return "", error
-    if len(slides) > 10:
-        return "", "PPT 内容过多：slides +create 单次最多支持 10 页。"
+    if max_pages and len(slides) > max_pages:
+        return "", f"PPT 内容过多：slides +create 单次最多支持 {max_pages} 页。"
     for index, slide in enumerate(slides, start=1):
         if not _slide_has_visible_text(slide):
             return "", f"PPT 第 {index} 页缺少可见文本内容。"
