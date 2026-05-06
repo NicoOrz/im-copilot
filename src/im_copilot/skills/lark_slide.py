@@ -23,10 +23,13 @@ SLIDE_XML_PROMPT = """你是飞书 PPT 生成助手。输出一个 JSON 数组�
 2. `<content>` 的直接子元素只能是 `<p>`、`<ul>`、`<ol>`
 3. 文字颜色和字号通过 `<span color="..." fontSize="...">文字</span>` 内联样式设置
 4. 每页必须有明确标题和可见中文内容
-5. slides 数量 5 到 8 页，第一页封面，最后一页结尾
+5. 新建场景：slides 数量 5 到 8 页，第一页封面，最后一页结尾；修改场景：严格按用户要求的页数增删，不要自行凑数
 6. bullets 每页 2 到 5 条，不要大段正文
 7. 根据主题选择风格：科技/AI → 深色背景；商务汇报 → 浅色背景；未指定默认浅色
 8. 参考内容只作为事实来源，不要把 XML/JSON 结构当页面内容
+9. 标题不得以“我们”开头
+10. 不要添加用户未要求的信息，包括密级、保密声明、汇报对象、日期、署名、部门名称
+11. 用户请求中有特定标题、页数、风格、结构或内容要求时，必须优先遵循
 
 ---
 
@@ -278,23 +281,34 @@ def update_slide_from_xml(token: str, slides_xml: str, uat: str) -> SkillArtifac
             del_resp = run_lark_cli([
                 "slides", "xml_presentation.slide", "delete",
                 "--params", json.dumps({"xml_presentation_id": token, "slide_id": slide_id}),
+                "--yes",
                 "--as", "user",
             ], uat=uat)
             if not _cli_ok(del_resp):
                 logger.warning("update_slide_from_xml delete failed slide_id=%r: %s", slide_id, del_resp)
 
         new_slides: list[str] = json.loads(slides_payload)
+        created_count = 0
         for slide_xml in new_slides:
+            clean_xml = _sanitize_slide_xml(slide_xml)
             create_resp = run_lark_cli([
                 "slides", "xml_presentation.slide", "create",
-                "--params", json.dumps({"xml_presentation_id": token, "slide_xml": slide_xml}),
+                "--params", json.dumps({"xml_presentation_id": token}),
+                "--data", json.dumps({"slide": {"content": clean_xml}}),
+                "--yes",
                 "--as", "user",
             ], uat=uat)
-            if not _cli_ok(create_resp):
+            if _cli_ok(create_resp):
+                created_count += 1
+            else:
                 logger.warning("update_slide_from_xml create failed: %s", create_resp)
 
-        result.update({"status": "updated"})
-        logger.info("update_slide_from_xml success token=%r slides=%s", token, len(new_slides))
+        if created_count > 0:
+            result.update({"status": "updated"})
+            logger.info("update_slide_from_xml success token=%r slides=%s/%s", token, created_count, len(new_slides))
+        else:
+            result.update({"status": "error", "error": "all slide creates failed"})
+            logger.error("update_slide_from_xml all creates failed token=%r", token)
     except Exception:
         logger.exception("update_slide_from_xml failed token=%r", token)
     return result
@@ -367,11 +381,19 @@ def generate_slide_xml(
     existing_content: str = "",
 ) -> tuple[str, str]:
     """返回 (slides_xml, cover_title)，cover_title 是封面标题，可用于演示文稿命名。"""
-    update_suffix = (
-        f"\n\n现有演示文稿 XML（按用户要求修改，保留无需变更的页面）：\n{existing_content[:8000]}"
-        if existing_content
-        else ""
-    )
+    update_suffix = ""
+    if existing_content:
+        annotated = _annotate_existing_slides(existing_content)
+        update_suffix = (
+            "\n\n## 现有演示文稿结构\n\n"
+            f"{annotated}\n\n"
+            "## 修改规则\n"
+            "- 输出完整的 slides JSON 数组（包含所有页面）\n"
+            "- 保留【封面页】和【结尾页】的 XML 不变，原样输出\n"
+            "- 新增页面插入到【结尾页】之前\n"
+            "- 严格按用户要求的页数新增，不要多加\n"
+            "- 不要生成新的结尾页\n"
+        )
     prompt = SLIDE_XML_PROMPT.format(
         message=message,
         context=(context or "（无）")[:9000],
@@ -383,6 +405,7 @@ def generate_slide_xml(
     # 优先路径：LLM 直接输出 XML 数组
     slides, xml_error = _extract_slide_xml_list(raw)
     if slides and not xml_error:
+        slides = _ensure_closing_slide_last(slides)
         cover_title = _cover_title_from_xml(slides[0])
         return json.dumps(slides, ensure_ascii=False), cover_title
 
@@ -392,6 +415,87 @@ def generate_slide_xml(
         deck = {"style": "business", "slides": _fallback_outline(message, context)}
     cover_title = _cover_title_from_deck(deck)
     return json.dumps(_render_slides(deck["slides"], style=deck["style"]), ensure_ascii=False), cover_title
+
+
+def _sanitize_slide_xml(xml: str) -> str:
+    """去除服务端专属属性，使 XML 可被 create API 接受。"""
+    xml = re.sub(r'\s+id="[^"]*"', "", xml)
+    xml = re.sub(r'\s+presetHandlers="[^"]*"', "", xml)
+    xml = re.sub(r'\s+fontFamily="[^"]*"', "", xml)
+    xml = re.sub(r"<note[^>]*>.*?</note>", "", xml, flags=re.DOTALL)
+    return xml
+
+
+def _annotate_existing_slides(content: str) -> str:
+    """解析现有 presentation，为每页标注角色（封面页/内容页/结尾页），方便 LLM 理解结构。"""
+    try:
+        parsed = json.loads(content)
+        xml_str = (
+            parsed.get("data", {}).get("xml_presentation", {}).get("content", "")
+            or parsed.get("content", "")
+        )
+        if xml_str:
+            content = xml_str
+    except (json.JSONDecodeError, AttributeError):
+        pass
+
+    slides = re.findall(r"<slide\b[^>]*>.*?</slide>", content, flags=re.DOTALL)
+    if not slides:
+        return "（空演示文稿）"
+
+    parts: list[str] = []
+    for i, slide in enumerate(slides):
+        clean = _sanitize_slide_xml(slide)
+        title = _cover_title_from_xml(clean) or "(无标题)"
+        if i == 0:
+            role = "封面页"
+        elif _is_closing_slide(clean):
+            role = "结尾页"
+        else:
+            role = f"内容页{i}"
+        parts.append(f"### 第{i+1}页 【{role}】标题：{title}\n```xml\n{clean}\n```")
+
+    return "\n\n".join(parts)
+
+
+def _is_closing_slide(slide_xml: str) -> bool:
+    """检测是否为结尾页：深色渐变背景 + 无 bullet list + 居中文字。"""
+    has_gradient = "linear-gradient" in slide_xml
+    has_bullet = "<ul>" in slide_xml or "<ol>" in slide_xml
+    has_center = 'textAlign="center"' in slide_xml or "textAlign=\\\"center\\\"" in slide_xml
+    return has_gradient and not has_bullet and has_center
+
+
+def _is_cover_slide(slide_xml: str) -> bool:
+    """检测是否为封面页：深色渐变背景 + 居中 + 大字号标题（>=40）。"""
+    has_gradient = "linear-gradient" in slide_xml
+    has_large_title = bool(re.search(r'fontSize="4[0-9]"', slide_xml) or re.search(r'fontSize=\\"4[0-9]\\"', slide_xml))
+    return has_gradient and has_large_title
+
+
+def _ensure_closing_slide_last(slides: list[str]) -> list[str]:
+    """确保只有一个结尾页且在最后位置。去重 + 归位。"""
+    if len(slides) <= 2:
+        return slides
+
+    # 分离：封面（第一页）、内容页、结尾页
+    cover = slides[0]
+    closing_candidates: list[str] = []
+    content_pages: list[str] = []
+
+    for slide in slides[1:]:
+        if _is_closing_slide(slide):
+            closing_candidates.append(slide)
+        else:
+            content_pages.append(slide)
+
+    # 保留最后一个结尾页（通常是原始的那个）
+    if closing_candidates:
+        closing = closing_candidates[-1]
+        return [cover] + content_pages + [closing]
+
+    # 没有检测到结尾页，保持原样
+    return slides
 
 
 def _cover_title_from_deck(deck: dict[str, Any]) -> str:
@@ -427,6 +531,7 @@ def _validated_slides_json(raw: str) -> tuple[str, str]:
 
 
 def _extract_slide_xml_list(raw: str) -> tuple[list[str], str]:
+    raw = _strip_code_fence(raw)
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError:

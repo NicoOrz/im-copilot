@@ -513,7 +513,7 @@ def _run_deterministic_artifacts(
             continue
 
         if artifact.get("status") == "error" or (
-            user_access_token and artifact.get("status") != "created"
+            user_access_token and artifact.get("status") not in ("created", "updated")
         ):
             record_event(
                 thread_id,
@@ -585,6 +585,9 @@ def _fetch_linked_doc_context(
     ]
     fetched_refs: list[dict[str, Any]] = []
     for ref in refs[:4]:
+        if "/slides/" in ref:
+            logger.info("linked_doc_context skipped slides ref thread_id=%s ref=%s", thread_id, ref)
+            continue
         content = fetch_doc_content(ref, user_access_token=user_access_token, doc_format="xml")
         logger.info(
             "linked_doc_context fetched thread_id=%s ref=%s content_len=%s",
