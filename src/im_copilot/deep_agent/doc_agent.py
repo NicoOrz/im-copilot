@@ -42,16 +42,14 @@ _MEETING_MINUTES_TEMPLATE = """会议纪要模板（必须输出 DocxXML）：
 _PRD_TEMPLATE = """PRD 模板（用户要求 PRD、产品需求文档、需求方案、需求说明时必须输出 DocxXML）：
 - 用户要求 PRD 时优先使用本模板，即使原始材料来自会议、聊天记录或已有文档。
 - 标题：<title>PRD：项目或需求名称</title>。
-- 一级标题与顺序固定：<h1>文档版本记录</h1>、<h1>一、 项目背景</h1>、<h1>二、 项目目标与评估</h1>、<h1>三、 竞品调研</h1>、<h1>四、 需求描述</h1>、<h1>五、 上线后效果评估</h1>。
-- 文档版本记录使用四列表格，列名固定为“文档版本 / 更新日期 / 撰写人 / 说明”；缺失信息写“待完善”。
+- 一级标题与顺序固定：<h1>文档版本记录</h1>、<h1>一、 项目背景</h1>、<h1>二、 项目目标与评估</h1>、<h1>三、 需求描述</h1>。
+- 文档版本记录使用四列表格，列名固定为”文档版本 / 更新日期 / 撰写人 / 说明”；缺失信息写”待完善”。
 - 项目背景要说明项目动因、需求来源、当前业务问题、相关数据或调研结论、各利益相关方收益；仅使用材料中可依据的信息。
-- 项目目标与评估要写清产品业务目标、项目价值评估方式、可量化指标、指标计算方式；缺失指标写“待完善”，不要编造数值。
-- 竞品调研使用四列表格，列名固定为“竞品 / 核心设计思路 / 详细功能说明及截图 / 可借鉴点”；没有竞品材料时保留表头并写“待调研”。
+- 项目目标与评估要写清产品业务目标、项目价值评估方式、可量化指标、指标计算方式；缺失指标写”待完善”，不要编造数值。
 - 需求描述必须包含两个二级标题：<h2>1、需求概述</h2>、<h2>2、需求详述</h2>。
 - 需求概述用一个段落说明需求要做什么、解决什么业务问题、面向哪些用户或场景。
 - 需求详述按材料组织业务流程、交互或视觉逻辑、原型信息、AB 实验方案、埋点需求、历史数据处理、新旧系统兼容、后端模块逻辑和业务规则；没有材料的部分不要展开。
-- 上线后效果评估在需求未上线时写“待上线后评估”；已有上线数据时写评估指标、数据来源、观察周期和结论。
-- 不要把模板指导语写入正文；未知信息统一写“待完善”。"""
+- 不要把模板指导语写入正文；未知信息统一写”待完善”。"""
 
 
 class ForceDocArtifactToolMiddleware(AgentMiddleware):
@@ -169,7 +167,12 @@ def build_doc_task_message(message: str, *, markdown: bool = False) -> str:
     return task_message
 
 
-def generate_doc_content(message: str) -> str:
+def generate_doc_content(message: str, *, existing_content: str = "") -> str:
+    update_section = (
+        f"\n以下是现有文档内容（DocxXML），按用户要求修改，保留无需变更的部分：\n{existing_content}"
+        if existing_content
+        else ""
+    )
     prompt = f"""{_doc_generation_prompt()}
 
 用户原始请求：
@@ -183,9 +186,9 @@ def generate_doc_content(message: str) -> str:
 - 必须输出合法 XML 标签结构，标签本身不要转义
 - 如果是 PRD 或产品需求文档，必须使用 PRD 模板，且输出 DocxXML，不得输出 Markdown
 - 如果是会议纪要，必须使用会议纪要模板，且输出 DocxXML，不得输出 Markdown
-- 如果用户原始请求包含“生成约束上下文”，必须把其中的 cite_users、whiteboards、images、checkboxes、links、grids 转化为对应 DocxXML 标签
-- 若 links 或用户输入 URL 非空，相关链接不得写“未提及相关链接”
-- 只输出文档内容，不要输出说明，不要使用代码块
+- 如果用户原始请求包含”生成约束上下文”，必须把其中的 cite_users、whiteboards、images、checkboxes、links、grids 转化为对应 DocxXML 标签
+- 若 links 或用户输入 URL 非空，相关链接不得写”未提及相关链接”
+- 只输出文档内容，不要输出说明，不要使用代码块{update_section}
 """
     content = get_llm_for_node("doc").invoke(prompt).content
     return _strip_code_fence(_content_to_text(content)).strip()

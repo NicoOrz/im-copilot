@@ -87,6 +87,58 @@ def create(state: Mapping[str, Any]) -> SkillArtifact:
     )
 
 
+def fetch_whiteboard_content(token: str, uat: str) -> str:
+    if not token or not uat:
+        return ""
+    try:
+        resp = run_lark_cli([
+            "whiteboard", "+query",
+            "--whiteboard-token", token,
+            "--output_as", "code",
+            "--as", "user",
+        ], uat=uat)
+        content = str(resp.get("data", {}).get("content") or resp.get("content") or "")
+        logger.info("fetch_whiteboard_content token=%r content_len=%s", token, len(content))
+        return content
+    except Exception:
+        logger.exception("fetch_whiteboard_content failed token=%r", token)
+        return ""
+
+
+def update_whiteboard_from_mermaid(token: str, mermaid: str, uat: str) -> SkillArtifact:
+    url = f"https://www.feishu.cn/docx/{token}"
+    result: SkillArtifact = {
+        "kind": "whiteboard",
+        "title": "",
+        "status": "error",
+        "preview": mermaid,
+        "token": token,
+        "url": url,
+    }
+    if not token or not uat:
+        logger.warning("update_whiteboard_from_mermaid skipped: missing token or uat")
+        return result
+    mermaid = _normalize_mermaid_text(_strip_code_fence(str(mermaid or "")).strip())
+    try:
+        resp = run_lark_cli([
+            "whiteboard", "+update",
+            "--whiteboard-token", token,
+            "--source", "-",
+            "--input_format", "mermaid",
+            "--overwrite",
+            "--yes",
+            "--as", "user",
+        ], uat=uat, stdin=mermaid)
+        if _cli_ok(resp):
+            result.update({"status": "updated"})
+            logger.info("update_whiteboard_from_mermaid success token=%r", token)
+        else:
+            logger.error("update_whiteboard_from_mermaid failed: %s", resp)
+    except Exception:
+        logger.exception("update_whiteboard_from_mermaid failed token=%r", token)
+    return result
+
+
 def create_whiteboard_from_mermaid(
     *,
     title: str,
@@ -156,11 +208,16 @@ def create_whiteboard_from_mermaid(
     return result
 
 
-def generate_whiteboard_mermaid(message: str, *, context: str = "") -> str:
+def generate_whiteboard_mermaid(message: str, *, context: str = "", existing_content: str = "") -> str:
+    update_suffix = (
+        f"\n以下是现有白板内容（Mermaid），按用户要求修改，保留无需变更的部分：\n{existing_content}"
+        if existing_content
+        else ""
+    )
     prompt = WHITEBOARD_MERMAID_PROMPT.format(
         context=(context or "（无）")[:9000],
         message=message,
-    )
+    ) + update_suffix
     content = get_llm_for_node("whiteboard").invoke(prompt).content
     mermaid = _strip_code_fence(_content_to_text(content)).strip()
     return _clean_mermaid(mermaid)

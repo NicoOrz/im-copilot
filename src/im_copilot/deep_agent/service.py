@@ -21,12 +21,18 @@ from im_copilot.skills.lark_doc import (
     extract_docx_xml_fields,
     fetch_doc_content,
     summarize_docx_xml_content,
+    update_doc_from_content,
 )
 from im_copilot.skills.lark_whiteboard import (
     create_whiteboard_from_mermaid,
     generate_whiteboard_mermaid,
 )
-from im_copilot.skills.lark_slide import create_slide_from_xml, generate_slide_xml
+from im_copilot.skills.lark_slide import (
+    create_slide_from_xml,
+    fetch_slide_content,
+    generate_slide_xml,
+    update_slide_from_xml,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +54,7 @@ ROUTER_PROMPT = """判断用户当前请求对应的业务类型。
 - 只看当前消息的真实目的；当前消息明确要求创建新文档、白板或 PPT 时，不能因为最近任务已完成而判为 chat。
 - 最近任务上下文只用于极短追问或修改上一产物，不能覆盖当前消息中的新创作请求。
 - 用户只是打招呼、追问、闲聊、询问信息，选择 chat。
+- 当用户意图是修改/更新/调整/重新设计现有产物时，把产物 URL 填入 update_targets；URL 来源：用户消息，或最近任务上下文的近期产物记录；新建时 update_targets 留空列表。
 - required_artifacts 必须列出需要创建的产物类型，chat 时为空列表。
 - 文档产物固定使用 DocxXML，doc_format 必须为 xml。
 
@@ -71,13 +78,17 @@ class RouteDecision(BaseModel):
     required_artifacts: list[Literal["doc", "whiteboard", "slide"]] = Field(default_factory=list)
     doc_format: Literal["xml"] = Field(default="xml", description="文档格式，固定为 DocxXML")
     reason: str = Field(default="", description="简短判断依据")
+    update_targets: list[str] = Field(
+        default_factory=list,
+        description="用户要修改的现有产物 URL 列表，新建时为空",
+    )
 
 
 @dataclass
 class Artifact:
     kind: str
     title: str
-    status: Literal["draft", "created", "error"]
+    status: Literal["draft", "created", "updated", "error"]
     preview: str = ""
     token: str = ""
     url: str = ""
@@ -284,6 +295,13 @@ def _parse_route_payload(content: str) -> RouteDecision | None:
         return None
     if not isinstance(payload, dict):
         return None
+    raw_targets: list[str] = payload.get("update_targets") or []
+    validated_targets: list[str] = []
+    if isinstance(raw_targets, list):
+        for url in raw_targets:
+            if isinstance(url, str) and url.strip():
+                validated_targets.append(url.strip())
+
     try:
         decision = RouteDecision(
             route=str(payload.get("route", "chat")),
@@ -293,6 +311,7 @@ def _parse_route_payload(content: str) -> RouteDecision | None:
             ],
             doc_format="xml",
             reason=str(payload.get("reason", "")),
+            update_targets=validated_targets,
         )
     except Exception:
         return None
@@ -341,26 +360,36 @@ def _run_deterministic_artifacts(
                 len(context),
             )
             doc_message = _message_with_context(message, context)
-            content = generate_doc_content(doc_message)
-            missing_requirements = _missing_docx_xml_requirements(context, content)
-            if missing_requirements:
-                logger.warning(
-                    "run_agent doc_generator missing_requirements thread_id=%s requirements=%s",
+
+            update_url = _find_update_target(route.update_targets, kind="doc")
+            if update_url and user_access_token:
+                token = _token_from_artifact_url(update_url)[1]
+                logger.info("run_agent doc_update start thread_id=%s token=%s", thread_id, token)
+                existing = fetch_doc_content(update_url, user_access_token=user_access_token, doc_format="xml")
+                content = generate_doc_content(doc_message, existing_content=existing)
+                artifact = update_doc_from_content(token, content, user_access_token)
+                artifact["url"] = update_url
+            else:
+                content = generate_doc_content(doc_message)
+                missing_requirements = _missing_docx_xml_requirements(context, content)
+                if missing_requirements:
+                    logger.warning(
+                        "run_agent doc_generator missing_requirements thread_id=%s requirements=%s",
+                        thread_id,
+                        missing_requirements,
+                    )
+                    content = generate_doc_content(_doc_rewrite_message(doc_message, content, missing_requirements))
+                logger.info(
+                    "run_agent doc_generator invoke_end thread_id=%s content_len=%s",
                     thread_id,
-                    missing_requirements,
+                    len(content),
                 )
-                content = generate_doc_content(_doc_rewrite_message(doc_message, content, missing_requirements))
-            logger.info(
-                "run_agent doc_generator invoke_end thread_id=%s content_len=%s",
-                thread_id,
-                len(content),
-            )
-            artifact = create_doc_from_content(
-                title=_doc_title_from_content(content) or _doc_title(message),
-                content=content,
-                user_access_token=user_access_token,
-                doc_format="xml",
-            )
+                artifact = create_doc_from_content(
+                    title=_doc_title_from_content(content) or _doc_title(message),
+                    content=content,
+                    user_access_token=user_access_token,
+                    doc_format="xml",
+                )
             artifacts["doc"] = dict(artifact)
             record_event(thread_id, source, "artifact_created", {"kind": "doc", "artifact": dict(artifact)})
             logger.info(
@@ -424,40 +453,51 @@ def _run_deterministic_artifacts(
                 len(message),
                 len(context),
             )
-            slides_xml = generate_slide_xml(message, context=context)
-            logger.info(
-                "run_agent slide_generator invoke_end thread_id=%s slides_xml_len=%s",
-                thread_id,
-                len(slides_xml),
-            )
-            artifact = create_slide_from_xml(
-                title=_slide_title(message),
-                slides_xml=slides_xml,
-                user_access_token=user_access_token,
-            )
-            if artifact.get("status") != "created":
-                retry_error = str(artifact.get("error") or "")
+            update_url = _find_update_target(route.update_targets, kind="slide")
+            if update_url and user_access_token:
+                token = _token_from_artifact_url(update_url)[1]
+                logger.info("run_agent slide_update start thread_id=%s token=%s", thread_id, token)
+                existing = fetch_slide_content(token, user_access_token)
+                slides_xml, _ = generate_slide_xml(message, context=context, existing_content=existing)
+                artifact = update_slide_from_xml(token, slides_xml, user_access_token)
+                artifact["url"] = update_url
+            else:
+                slides_xml, cover_title = generate_slide_xml(message, context=context)
+                slide_title = cover_title or _slide_title(message)
                 logger.info(
-                    "run_agent slide_generator retry_start thread_id=%s error=%s",
-                    thread_id,
-                    retry_error[:300],
-                )
-                slides_xml = generate_slide_xml(
-                    message,
-                    context=context,
-                    previous_xml=slides_xml,
-                    error=retry_error,
-                )
-                logger.info(
-                    "run_agent slide_generator retry_end thread_id=%s slides_xml_len=%s",
+                    "run_agent slide_generator invoke_end thread_id=%s slides_xml_len=%s title=%r",
                     thread_id,
                     len(slides_xml),
+                    slide_title,
                 )
                 artifact = create_slide_from_xml(
-                    title=_slide_title(message),
+                    title=slide_title,
                     slides_xml=slides_xml,
                     user_access_token=user_access_token,
                 )
+                if artifact.get("status") != "created":
+                    retry_error = str(artifact.get("error") or "")
+                    logger.info(
+                        "run_agent slide_generator retry_start thread_id=%s error=%s",
+                        thread_id,
+                        retry_error[:300],
+                    )
+                    slides_xml, _ = generate_slide_xml(
+                        message,
+                        context=context,
+                        existing_content=slides_xml,
+                        error=retry_error,
+                    )
+                    logger.info(
+                        "run_agent slide_generator retry_end thread_id=%s slides_xml_len=%s",
+                        thread_id,
+                        len(slides_xml),
+                    )
+                    artifact = create_slide_from_xml(
+                        title=slide_title,
+                        slides_xml=slides_xml,
+                        user_access_token=user_access_token,
+                    )
             artifacts["slide"] = dict(artifact)
             record_event(thread_id, source, "artifact_created", {"kind": "slide", "artifact": dict(artifact)})
             logger.info(
@@ -473,7 +513,7 @@ def _run_deterministic_artifacts(
             continue
 
         if artifact.get("status") == "error" or (
-            user_access_token and artifact.get("status") != "created"
+            user_access_token and artifact.get("status") not in ("created", "updated")
         ):
             record_event(
                 thread_id,
@@ -545,6 +585,9 @@ def _fetch_linked_doc_context(
     ]
     fetched_refs: list[dict[str, Any]] = []
     for ref in refs[:4]:
+        if "/slides/" in ref:
+            logger.info("linked_doc_context skipped slides ref thread_id=%s ref=%s", thread_id, ref)
+            continue
         content = fetch_doc_content(ref, user_access_token=user_access_token, doc_format="xml")
         logger.info(
             "linked_doc_context fetched thread_id=%s ref=%s content_len=%s",
@@ -582,7 +625,7 @@ def _fetch_linked_doc_context(
 
 def _doc_refs_from_recent_messages(thread_id: str, chat_id: str, message: str) -> list[str]:
     refs: list[str] = []
-    for ref in _doc_refs_from_message(message):
+    for ref in _artifact_refs_from_message(message):
         if ref not in refs:
             refs.append(ref)
     for event in reversed(list_events(thread_id)[-12:]):
@@ -592,7 +635,7 @@ def _doc_refs_from_recent_messages(thread_id: str, chat_id: str, message: str) -
         if _context_payload_is_bot_request(payload):
             continue
         text = str(payload.get("text") or "")
-        for ref in _doc_refs_from_message(text):
+        for ref in _artifact_refs_from_message(text):
             if ref not in refs:
                 refs.append(ref)
     if chat_id:
@@ -602,7 +645,7 @@ def _doc_refs_from_recent_messages(thread_id: str, chat_id: str, message: str) -
             if _context_payload_is_bot_request(payload):
                 continue
             text = str(payload.get("text") or "")
-            for ref in _doc_refs_from_message(text):
+            for ref in _artifact_refs_from_message(text):
                 if ref not in refs:
                     refs.append(ref)
     return refs
@@ -620,14 +663,36 @@ def _docx_xml_richness_score(fields: dict[str, Any]) -> int:
     )
 
 
-def _doc_refs_from_message(message: str) -> list[str]:
+def _artifact_refs_from_message(message: str) -> list[str]:
     refs: list[str] = []
-    pattern = re.compile(r"https?://[^\s<>()\"']+/(?:docx|wiki)/[A-Za-z0-9_-]+")
+    pattern = re.compile(
+        r"https?://[^\s<>()\"']+/(?:docx|wiki|slides)/[A-Za-z0-9_-]+"
+    )
     for match in pattern.findall(message):
         ref = match.strip().rstrip("。.,，；;！？】])》")
         if ref and ref not in refs:
             refs.append(ref)
     return refs
+
+
+def _token_from_artifact_url(url: str) -> tuple[str, str]:
+    """返回 (kind, token)，kind 是 doc/slide，token 是产物标识符。"""
+    m = re.search(r"/(?:docx|wiki)/([A-Za-z0-9_-]+)", url)
+    if m:
+        return "doc", m.group(1)
+    m = re.search(r"/slides/([A-Za-z0-9_-]+)", url)
+    if m:
+        return "slide", m.group(1)
+    return "", ""
+
+
+def _find_update_target(targets: list[str], *, kind: str) -> str:
+    """从 update_targets 里找第一个匹配 kind 的 URL，没有返回空字符串。"""
+    for url in targets:
+        k, _ = _token_from_artifact_url(url)
+        if k == kind:
+            return url
+    return ""
 
 
 def _generation_context(
@@ -697,6 +762,17 @@ def _truncate_context(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit] + "\n...[truncated]"
 
 
+def _filter_update_targets(decision: RouteDecision, message: str, task_context: str = "") -> RouteDecision:
+    """过滤 update_targets：只保留能在原始消息或最近任务上下文里找到的 URL，防止 LLM 幻觉。"""
+    if not decision.update_targets:
+        return decision
+    searchable = message + "\n" + task_context
+    valid = [url for url in decision.update_targets if url in searchable]
+    if len(valid) == len(decision.update_targets):
+        return decision
+    return decision.model_copy(update={"update_targets": valid})
+
+
 def _route_message(message: str, thread_id: str) -> RouteDecision:
     history = _message_history(thread_id)
     history_text = "\n".join(f"{item['role']}: {item['content']}" for item in history[-6:])
@@ -714,6 +790,7 @@ def _route_message(message: str, thread_id: str) -> RouteDecision:
             decision = invoke_structured("deep_agent_router", RouteDecision, prompt)
             decision = _normalize_route_decision(decision)
             decision = _continue_recent_task_if_needed(message, decision, recent_task_state)
+            decision = _filter_update_targets(decision, message, task_context)
             return decision
         except Exception as exc:
             last_error = exc
@@ -740,6 +817,7 @@ def _route_message(message: str, thread_id: str) -> RouteDecision:
         parsed = _parse_route_payload(content)
         if parsed:
             parsed = _continue_recent_task_if_needed(message, parsed, recent_task_state)
+            parsed = _filter_update_targets(parsed, message, task_context)
             return parsed
     except Exception as exc:
         last_error = exc
@@ -850,9 +928,14 @@ def _format_recent_task_context(state: dict[str, Any]) -> str:
         for artifact in artifacts[:3]:
             if not isinstance(artifact, dict):
                 continue
-            title = artifact.get("title") or artifact.get("kind") or "产物"
+            kind = artifact.get("kind") or "artifact"
+            title = artifact.get("title") or kind
             status = artifact.get("status") or "draft"
-            preview_parts.append(f"{artifact.get('kind') or 'artifact'}:{title}:{status}")
+            url = artifact.get("url") or ""
+            entry = f"{kind}:{title}:{status}"
+            if url:
+                entry += f" ({url})"
+            preview_parts.append(entry)
         if preview_parts:
             parts.append(f"近期产物：{'；'.join(preview_parts)}")
     summary = str(state.get("summary") or "").strip()

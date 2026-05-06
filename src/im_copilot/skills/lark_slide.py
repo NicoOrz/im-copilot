@@ -13,10 +13,172 @@ from im_copilot.skills.base import SkillArtifact
 
 logger = logging.getLogger(__name__)
 
-SLIDE_OUTLINE_PROMPT = """你是飞书汇报 PPT 内容规划助手。只输出 JSON，不要输出 Markdown 或说明文字。
+SLIDE_XML_PROMPT = """你是飞书 PPT 生成助手。输出一个 JSON 数组，每个元素是一页幻灯片的完整 XML 字符串。
+只输出 JSON 数组，不要输出 Markdown 代码块、说明文字或其他内容。
 
-用户请求：
-{message}
+画布尺寸：宽 960px，高 540px。
+
+关键约束：
+1. 渐变色必须用 rgba() + 百分比停靠点，如 `linear-gradient(135deg,rgba(15,23,42,1) 0%,rgba(56,97,140,1) 100%)`；用 rgb() 或省略停靠点会变白
+2. `<content>` 的直接子元素只能是 `<p>`、`<ul>`、`<ol>`
+3. 文字颜色和字号通过 `<span color="..." fontSize="...">文字</span>` 内联样式设置
+4. 每页必须有明确标题和可见中文内容
+5. 新建场景：slides 数量 5 到 8 页，第一页封面，最后一页结尾；修改场景：严格按用户要求的页数增删，不要自行凑数
+6. bullets 每页 2 到 5 条，不要大段正文
+7. 根据主题选择风格：科技/AI → 深色背景；商务汇报 → 浅色背景；未指定默认浅色
+8. 参考内容只作为事实来源，不要把 XML/JSON 结构当页面内容
+9. 标题不得以“我们”开头
+10. 不要添加用户未要求的信息，包括密级、保密声明、汇报对象、日期、署名、部门名称
+11. 用户请求中有特定标题、页数、风格、结构或内容要求时，必须优先遵循
+
+---
+
+## 模板示例
+
+### 深色封面页（第一页必须是这种风格）
+
+```xml
+<slide xmlns="http://www.larkoffice.com/sml/2.0">
+  <style><fill><fillColor color="linear-gradient(135deg,rgba(15,23,42,1) 0%,rgba(56,97,140,1) 100%)"/></fill></style>
+  <data>
+    <shape type="text" topLeftX="80" topLeftY="160" width="800" height="70">
+      <content><p textAlign="center"><strong><span color="rgb(255,255,255)" fontSize="44">主标题</span></strong></p></content>
+    </shape>
+    <shape type="text" topLeftX="80" topLeftY="250" width="800" height="35">
+      <content><p textAlign="center"><span color="rgb(148,163,184)" fontSize="20">副标题</span></p></content>
+    </shape>
+    <shape type="text" topLeftX="80" topLeftY="420" width="800" height="25">
+      <content><p textAlign="center"><span color="rgb(100,116,139)" fontSize="14">底部信息</span></p></content>
+    </shape>
+  </data>
+</slide>
+```
+
+### 浅色内容页（通用正文页）
+
+```xml
+<slide xmlns="http://www.larkoffice.com/sml/2.0">
+  <style><fill><fillColor color="rgb(248,250,252)"/></fill></style>
+  <data>
+    <shape type="rect" topLeftX="60" topLeftY="40" width="4" height="35">
+      <fill><fillColor color="rgb(59,130,246)"/></fill>
+    </shape>
+    <shape type="text" topLeftX="76" topLeftY="36" width="600" height="45">
+      <content><p><strong><span color="rgb(15,23,42)" fontSize="28">页面标题</span></strong></p></content>
+    </shape>
+    <shape type="text" topLeftX="60" topLeftY="100" width="840" height="380">
+      <content textType="body" lineSpacing="multiple:1.8">
+        <p><span color="rgb(51,65,85)" fontSize="15">正文段落</span></p>
+        <ul>
+          <li><p><span color="rgb(51,65,85)" fontSize="15">要点一</span></p></li>
+          <li><p><span color="rgb(51,65,85)" fontSize="15">要点二</span></p></li>
+          <li><p><span color="rgb(51,65,85)" fontSize="15">要点三</span></p></li>
+        </ul>
+      </content>
+    </shape>
+  </data>
+</slide>
+```
+
+### 数据卡片页（横排指标）
+
+```xml
+<slide xmlns="http://www.larkoffice.com/sml/2.0">
+  <style><fill><fillColor color="rgb(248,250,252)"/></fill></style>
+  <data>
+    <shape type="text" topLeftX="60" topLeftY="36" width="600" height="45">
+      <content><p><strong><span color="rgb(15,23,42)" fontSize="28">数据概览</span></strong></p></content>
+    </shape>
+    <shape type="rect" topLeftX="60" topLeftY="100" width="260" height="140">
+      <fill><fillColor color="rgb(255,255,255)"/></fill>
+      <border color="rgba(0,0,0,0.08)" width="1"/>
+    </shape>
+    <shape type="text" topLeftX="60" topLeftY="115" width="260" height="50">
+      <content><p textAlign="center"><strong><span color="rgb(59,130,246)" fontSize="36">数值</span></strong></p></content>
+    </shape>
+    <shape type="text" topLeftX="60" topLeftY="175" width="260" height="25">
+      <content><p textAlign="center"><span color="rgb(100,116,139)" fontSize="14">指标名称</span></p></content>
+    </shape>
+    <shape type="rect" topLeftX="350" topLeftY="100" width="260" height="140">
+      <fill><fillColor color="rgb(255,255,255)"/></fill>
+      <border color="rgba(0,0,0,0.08)" width="1"/>
+    </shape>
+    <shape type="text" topLeftX="350" topLeftY="115" width="260" height="50">
+      <content><p textAlign="center"><strong><span color="rgb(59,130,246)" fontSize="36">数值2</span></strong></p></content>
+    </shape>
+    <shape type="text" topLeftX="350" topLeftY="175" width="260" height="25">
+      <content><p textAlign="center"><span color="rgb(100,116,139)" fontSize="14">指标名称2</span></p></content>
+    </shape>
+    <shape type="rect" topLeftX="640" topLeftY="100" width="260" height="140">
+      <fill><fillColor color="rgb(255,255,255)"/></fill>
+      <border color="rgba(0,0,0,0.08)" width="1"/>
+    </shape>
+    <shape type="text" topLeftX="640" topLeftY="115" width="260" height="50">
+      <content><p textAlign="center"><strong><span color="rgb(59,130,246)" fontSize="36">数值3</span></strong></p></content>
+    </shape>
+    <shape type="text" topLeftX="640" topLeftY="175" width="260" height="25">
+      <content><p textAlign="center"><span color="rgb(100,116,139)" fontSize="14">指标名称3</span></p></content>
+    </shape>
+  </data>
+</slide>
+```
+
+### 行动计划页（编号列表）
+
+```xml
+<slide xmlns="http://www.larkoffice.com/sml/2.0">
+  <style><fill><fillColor color="rgb(248,250,252)"/></fill></style>
+  <data>
+    <shape type="text" topLeftX="60" topLeftY="38" width="820" height="55">
+      <content><p><strong><span color="rgb(15,23,42)" fontSize="28">行动计划</span></strong></p></content>
+    </shape>
+    <line startX="60" startY="102" endX="900" endY="102">
+      <border color="rgb(59,130,246)" width="2"/>
+    </line>
+    <shape type="text" topLeftX="78" topLeftY="135" width="70" height="28">
+      <content><p><strong><span color="rgb(59,130,246)" fontSize="16">01</span></strong></p></content>
+    </shape>
+    <shape type="text" topLeftX="150" topLeftY="135" width="730" height="34">
+      <content><p><span color="rgb(30,41,59)" fontSize="16">第一条行动项</span></p></content>
+    </shape>
+    <shape type="text" topLeftX="78" topLeftY="193" width="70" height="28">
+      <content><p><strong><span color="rgb(59,130,246)" fontSize="16">02</span></strong></p></content>
+    </shape>
+    <shape type="text" topLeftX="150" topLeftY="193" width="730" height="34">
+      <content><p><span color="rgb(30,41,59)" fontSize="16">第二条行动项</span></p></content>
+    </shape>
+    <shape type="text" topLeftX="78" topLeftY="251" width="70" height="28">
+      <content><p><strong><span color="rgb(59,130,246)" fontSize="16">03</span></strong></p></content>
+    </shape>
+    <shape type="text" topLeftX="150" topLeftY="251" width="730" height="34">
+      <content><p><span color="rgb(30,41,59)" fontSize="16">第三条行动项</span></p></content>
+    </shape>
+  </data>
+</slide>
+```
+
+### 深色结尾页（最后一页必须是这种风格）
+
+```xml
+<slide xmlns="http://www.larkoffice.com/sml/2.0">
+  <style><fill><fillColor color="linear-gradient(135deg,rgba(15,23,42,1) 0%,rgba(56,97,140,1) 100%)"/></fill></style>
+  <data>
+    <shape type="text" topLeftX="80" topLeftY="190" width="800" height="55">
+      <content><p textAlign="center"><strong><span color="rgb(255,255,255)" fontSize="36">感谢语或行动号召</span></strong></p></content>
+    </shape>
+    <line startX="410" startY="260" endX="550" endY="260">
+      <border color="rgb(59,130,246)" width="2"/>
+    </line>
+    <shape type="text" topLeftX="80" topLeftY="280" width="800" height="30">
+      <content><p textAlign="center"><span color="rgb(148,163,184)" fontSize="16">补充说明</span></p></content>
+    </shape>
+  </data>
+</slide>
+```
+
+---
+
+用户请求：{message}
 
 参考内容：
 {context}
@@ -24,29 +186,7 @@ SLIDE_OUTLINE_PROMPT = """你是飞书汇报 PPT 内容规划助手。只输出 
 创建失败信息：
 {error}
 
-吸收的 lark-slides 设计规则：
-- 这是演示文稿，不是文档；每页信息密度低于文档，必须保留清晰层级和留白。
-- 根据主题选择风格：科技/AI/产品用 tech；商务汇报/季度总结用 business；周报/日常汇报用 weekly；培训教程用 fresh；未指定用 business。
-- 页面类型从这些值中选择：cover、summary、section、content、metrics、action、timeline、closing。
-- 推荐结构：封面页、核心结论或数据概览、主题内容页、Action 项或时间线、结尾页。
-- 内容页不要堆长段落；每页 bullets 控制在 2 到 5 条。
-- Action 页适合负责人、任务、期限；timeline 页适合里程碑；metrics 页适合数字、目标、百分比、耗时等指标。
-- 不要输出 XML；XML 由代码按飞书 slides 协议渲染。
-- 不得生成空白页；每页必须有明确标题和可见中文内容。
-- 参考内容只作为事实来源；不要把既有产物预览、内部提示文本、XML 或 JSON 结构当作页面内容。
-
-要求：
-- 输出 JSON 对象：{{"style":"business|tech|weekly|fresh","slides":[...]}}
-- slides 数组长度 5 到 8
-- 每个 slide 包含 layout、title、subtitle、bullets、metrics
-- layout 只能是 cover、summary、section、content、metrics、action、timeline、closing
-- title 是页面标题
-- subtitle 是可选短说明，没有则为空字符串
-- bullets 是 2 到 5 条中文要点
-- metrics 是可选数组，每个元素包含 label、value、note；无指标则为空数组
-- 内容忠实覆盖参考内容，不添加无依据事实
-- title 不得为空；bullets 不能为空
-- 不要输出 XML
+输出 JSON 数组，如：["<slide ...>...</slide>", "<slide ...>...</slide>", ...]
 """
 
 
@@ -54,15 +194,133 @@ def create(state: Mapping[str, Any]) -> SkillArtifact:
     topic = state.get("intent_params", {}).get("topic", "未命名PPT")
     raw_message = state.get("raw_message", "")
     uat = state.get("user_access_token", "")
-    title = f"PPT：{topic}"
 
-    slides_xml = generate_slide_xml(raw_message)
+    slides_xml, cover_title = generate_slide_xml(raw_message)
+    title = cover_title or f"PPT：{topic}"
 
     return create_slide_from_xml(
         title=title,
         slides_xml=slides_xml,
         user_access_token=uat,
     )
+
+
+def fetch_slide_content(token: str, uat: str) -> str:
+    if not token or not uat:
+        return ""
+    try:
+        resp = run_lark_cli([
+            "slides", "xml_presentations", "get",
+            "--params", json.dumps({"xml_presentation_id": token}),
+            "--as", "user",
+        ], uat=uat)
+        raw = json.dumps(resp, ensure_ascii=False)
+        logger.info("fetch_slide_content token=%r resp_len=%s", token, len(raw))
+        return raw
+    except Exception:
+        logger.exception("fetch_slide_content failed token=%r", token)
+        return ""
+
+
+def fetch_slide_ids(token: str, uat: str) -> list[str]:
+    if not token or not uat:
+        return []
+    try:
+        resp = run_lark_cli([
+            "slides", "xml_presentations", "get",
+            "--params", json.dumps({"xml_presentation_id": token}),
+            "--as", "user",
+        ], uat=uat)
+        # 优先从 JSON 数组取（兼容未来 API 变更）
+        slides = (
+            resp.get("data", {}).get("slides")
+            or resp.get("slides")
+            or []
+        )
+        if slides and isinstance(slides[0], dict):
+            ids = [str(s.get("slide_id") or s.get("id") or "") for s in slides if isinstance(s, dict)]
+        else:
+            # 从 presentation XML 中解析 <slide id="...">
+            xml_content = (
+                resp.get("data", {}).get("xml_presentation", {}).get("content", "")
+                or resp.get("content", "")
+            )
+            ids = re.findall(r'<slide\b[^>]*\bid="([^"]+)"', xml_content)
+        ids = [i for i in ids if i]
+        logger.info("fetch_slide_ids token=%r count=%s", token, len(ids))
+        return ids
+    except Exception:
+        logger.exception("fetch_slide_ids failed token=%r", token)
+        return []
+
+
+def _cli_ok(resp: dict[str, Any]) -> bool:
+    if not resp:
+        return False
+    if resp.get("ok") is False or resp.get("error"):
+        return False
+    code = resp.get("code")
+    return code in (None, 0)
+
+
+def update_slide_from_xml(token: str, slides_xml: str, uat: str) -> SkillArtifact:
+    url = f"https://www.feishu.cn/slides/{token}"
+    result: SkillArtifact = {
+        "kind": "slide",
+        "title": "",
+        "status": "error",
+        "preview": slides_xml,
+        "token": token,
+        "url": url,
+    }
+    if not token or not uat:
+        logger.warning("update_slide_from_xml skipped: missing token or uat")
+        return result
+    try:
+        slides_payload, validation_error = _validated_slides_json(slides_xml, max_pages=20)
+        if validation_error:
+            result.update({"error": validation_error})
+            logger.error("update_slide_from_xml validation failed: %s", validation_error)
+            return result
+
+        existing_ids = fetch_slide_ids(token, uat)
+        logger.info("update_slide_from_xml token=%r existing_slides=%s", token, len(existing_ids))
+
+        for slide_id in existing_ids:
+            del_resp = run_lark_cli([
+                "slides", "xml_presentation.slide", "delete",
+                "--params", json.dumps({"xml_presentation_id": token, "slide_id": slide_id}),
+                "--yes",
+                "--as", "user",
+            ], uat=uat)
+            if not _cli_ok(del_resp):
+                logger.warning("update_slide_from_xml delete failed slide_id=%r: %s", slide_id, del_resp)
+
+        new_slides: list[str] = json.loads(slides_payload)
+        created_count = 0
+        for slide_xml in new_slides:
+            clean_xml = _sanitize_slide_xml(slide_xml)
+            create_resp = run_lark_cli([
+                "slides", "xml_presentation.slide", "create",
+                "--params", json.dumps({"xml_presentation_id": token}),
+                "--data", json.dumps({"slide": {"content": clean_xml}}),
+                "--yes",
+                "--as", "user",
+            ], uat=uat)
+            if _cli_ok(create_resp):
+                created_count += 1
+            else:
+                logger.warning("update_slide_from_xml create failed: %s", create_resp)
+
+        if created_count > 0:
+            result.update({"status": "updated"})
+            logger.info("update_slide_from_xml success token=%r slides=%s/%s", token, created_count, len(new_slides))
+        else:
+            result.update({"status": "error", "error": "all slide creates failed"})
+            logger.error("update_slide_from_xml all creates failed token=%r", token)
+    except Exception:
+        logger.exception("update_slide_from_xml failed token=%r", token)
+    return result
 
 
 def create_slide_from_xml(
@@ -129,30 +387,233 @@ def generate_slide_xml(
     context: str = "",
     previous_xml: str = "",
     error: str = "",
-) -> str:
-    prompt = SLIDE_OUTLINE_PROMPT.format(
+    existing_content: str = "",
+) -> tuple[str, str]:
+    """返回 (slides_xml, cover_title)，cover_title 是封面标题，可用于演示文稿命名。"""
+    if existing_content:
+        return _generate_update_slides(message, context=context, error=error, existing_content=existing_content)
+
+    prompt = SLIDE_XML_PROMPT.format(
         message=message,
         context=(context or "（无）")[:9000],
         error=(error or "（无）")[:1200],
     )
     content = get_llm_for_node("slide", timeout=60, max_retries=1).invoke(prompt).content
-    deck = _parse_deck(_strip_code_fence(_content_to_text(content)).strip())
+    raw = _strip_code_fence(_content_to_text(content)).strip()
+
+    slides, xml_error = _extract_slide_xml_list(raw)
+    if slides and not xml_error:
+        slides = _ensure_closing_slide_last(slides)
+        cover_title = _cover_title_from_xml(slides[0])
+        return json.dumps(slides, ensure_ascii=False), cover_title
+
+    deck = _parse_deck(raw)
     if not deck["slides"]:
         deck = {"style": "business", "slides": _fallback_outline(message, context)}
-    return json.dumps(_render_slides(deck["slides"], style=deck["style"]), ensure_ascii=False)
+    cover_title = _cover_title_from_deck(deck)
+    return json.dumps(_render_slides(deck["slides"], style=deck["style"]), ensure_ascii=False), cover_title
 
 
-def _slides_json(raw: str) -> str:
-    slides, _ = _extract_slide_xml_list(raw)
-    return json.dumps(slides or [raw], ensure_ascii=False)
+SLIDE_UPDATE_PROMPT = """你是飞书 PPT 编辑助手。用户要求对现有演示文稿进行修改。
+只输出【新增或修改的页面】的 JSON 数组，不要输出已有的未变更页面。
+只输出 JSON 数组，不要输出 Markdown 代码块、说明文字或其他内容。
+
+画布尺寸：宽 960px，高 540px。
+
+关键约束：
+1. 渐变色必须用 rgba() + 百分比停靠点
+2. `<content>` 的直接子元素只能是 `<p>`、`<ul>`、`<ol>`
+3. 文字颜色和字号通过 `<span color="..." fontSize="...">文字</span>` 设置
+4. 每页必须有明确标题和可见中文内容
+5. 严格按用户要求的页数生成，用户说加 1 页就只输出 1 页
+6. bullets 每页 2 到 5 条
+7. 不要输出封面页或结尾页
+8. 不要添加用户未要求的信息
+9. 使用浅色内容页风格（背景 rgb(248,250,252)），与现有页面保持一致
+
+现有演示文稿完整内容：
+{existing_content}
+
+用户请求：{message}
+
+参考内容：
+{context}
+
+创建失败信息：
+{error}
+
+输出 JSON 数组（只含新增页面）：["<slide ...>...</slide>"]
+"""
 
 
-def _validated_slides_json(raw: str) -> tuple[str, str]:
+def _generate_update_slides(
+    message: str,
+    *,
+    context: str = "",
+    error: str = "",
+    existing_content: str = "",
+) -> tuple[str, str]:
+    """更新场景：LLM 只生成新增页面，代码负责插入到结尾页之前。"""
+    existing_slides = _extract_slides_from_presentation(existing_content)
+    annotated = _annotate_existing_slides(existing_content)
+
+    prompt = SLIDE_UPDATE_PROMPT.format(
+        message=message,
+        context=(context or "（无）")[:9000],
+        error=(error or "（无）")[:1200],
+        existing_content=annotated,
+    )
+    content = get_llm_for_node("slide", timeout=60, max_retries=1).invoke(prompt).content
+    raw = _strip_code_fence(_content_to_text(content)).strip()
+
+    new_slides, xml_error = _extract_slide_xml_list(raw)
+    if not new_slides or xml_error:
+        logger.warning("_generate_update_slides LLM output invalid: %s", xml_error)
+        return json.dumps(existing_slides, ensure_ascii=False), ""
+
+    merged = _insert_before_closing(existing_slides, new_slides)
+    cover_title = _cover_title_from_xml(merged[0]) if merged else ""
+    return json.dumps(merged, ensure_ascii=False), cover_title
+
+
+def _extract_slides_from_presentation(content: str) -> list[str]:
+    """从 presentation XML 或 JSON 响应中提取各页 slide XML。"""
+    try:
+        parsed = json.loads(content)
+        xml_str = (
+            parsed.get("data", {}).get("xml_presentation", {}).get("content", "")
+            or parsed.get("content", "")
+        )
+        if xml_str:
+            content = xml_str
+    except (json.JSONDecodeError, AttributeError):
+        pass
+
+    slides = re.findall(r"<slide\b[^>]*>.*?</slide>", content, flags=re.DOTALL)
+    return [_sanitize_slide_xml(s) for s in slides]
+
+
+def _insert_before_closing(existing: list[str], new_pages: list[str]) -> list[str]:
+    """将新页面插入到结尾页之前。"""
+    if not existing:
+        return new_pages
+
+    # 从后往前找结尾页
+    for i in range(len(existing) - 1, 0, -1):
+        if _is_closing_slide(existing[i]):
+            return existing[:i] + new_pages + existing[i:]
+
+    # 没找到结尾页，追加到最后
+    return existing + new_pages
+
+
+def _sanitize_slide_xml(xml: str) -> str:
+    """去除服务端专属属性，使 XML 可被 create API 接受。"""
+    xml = re.sub(r'\s+id="[^"]*"', "", xml)
+    xml = re.sub(r'\s+presetHandlers="[^"]*"', "", xml)
+    xml = re.sub(r'\s+fontFamily="[^"]*"', "", xml)
+    xml = re.sub(r"<note[^>]*>.*?</note>", "", xml, flags=re.DOTALL)
+    return xml
+
+
+def _annotate_existing_slides(content: str) -> str:
+    """解析现有 presentation，为每页标注角色（封面页/内容页/结尾页），方便 LLM 理解结构。"""
+    try:
+        parsed = json.loads(content)
+        xml_str = (
+            parsed.get("data", {}).get("xml_presentation", {}).get("content", "")
+            or parsed.get("content", "")
+        )
+        if xml_str:
+            content = xml_str
+    except (json.JSONDecodeError, AttributeError):
+        pass
+
+    slides = re.findall(r"<slide\b[^>]*>.*?</slide>", content, flags=re.DOTALL)
+    if not slides:
+        return "（空演示文稿）"
+
+    parts: list[str] = []
+    for i, slide in enumerate(slides):
+        clean = _sanitize_slide_xml(slide)
+        title = _cover_title_from_xml(clean) or "(无标题)"
+        if i == 0:
+            role = "封面页"
+        elif _is_closing_slide(clean):
+            role = "结尾页"
+        else:
+            role = f"内容页{i}"
+        parts.append(f"### 第{i+1}页 【{role}】标题：{title}\n```xml\n{clean}\n```")
+
+    return "\n\n".join(parts)
+
+
+def _is_closing_slide(slide_xml: str) -> bool:
+    """检测是否为结尾页：深色渐变背景 + 无 bullet list + 居中文字。"""
+    has_gradient = "linear-gradient" in slide_xml
+    has_bullet = "<ul>" in slide_xml or "<ol>" in slide_xml
+    has_center = 'textAlign="center"' in slide_xml or "textAlign=\\\"center\\\"" in slide_xml
+    return has_gradient and not has_bullet and has_center
+
+
+def _is_cover_slide(slide_xml: str) -> bool:
+    """检测是否为封面页：深色渐变背景 + 居中 + 大字号标题（>=40）。"""
+    has_gradient = "linear-gradient" in slide_xml
+    has_large_title = bool(re.search(r'fontSize="4[0-9]"', slide_xml) or re.search(r'fontSize=\\"4[0-9]\\"', slide_xml))
+    return has_gradient and has_large_title
+
+
+def _ensure_closing_slide_last(slides: list[str]) -> list[str]:
+    """确保只有一个结尾页且在最后位置。去重 + 归位。"""
+    if len(slides) <= 2:
+        return slides
+
+    # 分离：封面（第一页）、内容页、结尾页
+    cover = slides[0]
+    closing_candidates: list[str] = []
+    content_pages: list[str] = []
+
+    for slide in slides[1:]:
+        if _is_closing_slide(slide):
+            closing_candidates.append(slide)
+        else:
+            content_pages.append(slide)
+
+    # 保留最后一个结尾页（通常是原始的那个）
+    if closing_candidates:
+        closing = closing_candidates[-1]
+        return [cover] + content_pages + [closing]
+
+    # 没有检测到结尾页，保持原样
+    return slides
+
+
+def _cover_title_from_deck(deck: dict[str, Any]) -> str:
+    for slide in (deck.get("slides") or []):
+        if isinstance(slide, dict):
+            title = str(slide.get("title") or "").strip()
+            if title:
+                return title
+    return ""
+
+
+def _cover_title_from_xml(slide_xml: str) -> str:
+    matches = re.findall(r'fontSize="(\d+)"[^>]*>([^<]+)</span>', slide_xml)
+    if not matches:
+        return ""
+    candidates = [(int(fs), text.strip()) for fs, text in matches if text.strip()]
+    if not candidates:
+        return ""
+    return max(candidates, key=lambda c: c[0])[1]
+
+
+
+def _validated_slides_json(raw: str, *, max_pages: int = 10) -> tuple[str, str]:
     slides, error = _extract_slide_xml_list(raw)
     if error:
         return "", error
-    if len(slides) > 10:
-        return "", "PPT 内容过多：slides +create 单次最多支持 10 页。"
+    if max_pages and len(slides) > max_pages:
+        return "", f"PPT 内容过多：slides +create 单次最多支持 {max_pages} 页。"
     for index, slide in enumerate(slides, start=1):
         if not _slide_has_visible_text(slide):
             return "", f"PPT 第 {index} 页缺少可见文本内容。"
@@ -160,6 +621,7 @@ def _validated_slides_json(raw: str) -> tuple[str, str]:
 
 
 def _extract_slide_xml_list(raw: str) -> tuple[list[str], str]:
+    raw = _strip_code_fence(raw)
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError:
