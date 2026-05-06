@@ -1355,13 +1355,32 @@ def on_card_action(
         operator_open_id = ""
         if data.event.operator:
             operator_open_id = data.event.operator.open_id or ""
-        message = _handle_group_meeting_card_action(
-            action=user_action,
-            board_item_id=board_item_id,
-            operator_open_id=operator_open_id,
-            lark_bot=lark_bot,
-        )
-        return _make_card_response(message)
+        if user_action == "ignore_group_meeting_event":
+            message = _handle_group_meeting_card_action(
+                action=user_action,
+                board_item_id=board_item_id,
+                operator_open_id=operator_open_id,
+                lark_bot=lark_bot,
+            )
+            return _make_card_response(message)
+        # create_group_meeting_event involves calendar API calls that can exceed
+        # Feishu's 3-second callback deadline — run async and notify via DM.
+        def _create_meeting_bg(
+            _action: str = user_action,
+            _board_item_id: int = board_item_id,
+            _operator_open_id: str = operator_open_id,
+        ) -> None:
+            result_msg = _handle_group_meeting_card_action(
+                action=_action,
+                board_item_id=_board_item_id,
+                operator_open_id=_operator_open_id,
+                lark_bot=lark_bot,
+            )
+            if _operator_open_id:
+                lark_bot.send_text_to_open_id(_operator_open_id, result_msg)
+        worker = threading.Thread(target=_create_meeting_bg, daemon=True)
+        worker.start()
+        return _make_card_response("正在创建日程，请稍候…")
 
     if user_action in {"confirm_todo", "reject_todo"}:
         todo_id = action_value.get("todo_id")
